@@ -6,10 +6,10 @@ echo.
 
 echo [1/4] Setting up Python virtual environment...
 cd python-backend
-python -m venv venv
+uv venv
 if %errorlevel% neq 0 (
     echo ERROR: Failed to create Python virtual environment
-    echo Make sure Python 3.8+ is installed and in PATH
+    echo Make sure uv is installed: pip install uv
     pause
     exit /b 1
 )
@@ -17,9 +17,8 @@ if %errorlevel% neq 0 (
 echo [2/4] Activating virtual environment...
 call venv\Scripts\activate.bat
 
-echo [3/4] Installing Python dependencies...
-pip install --upgrade pip
-pip install -r requirements.txt
+echo [3/4] Installing Python dependencies (with uv - fast!)...
+uv pip sync requirements.txt
 if %errorlevel% neq 0 (
     echo ERROR: Failed to install Python dependencies
     pause

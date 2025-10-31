@@ -13,6 +13,7 @@ Document De-Bundler is a Tauri-based desktop application for processing, splitti
 **IMPORTANT**: This project MUST remain completely self-contained and isolated from the system and other projects.
 
 - **Python**: Always use the virtual environment in `python-backend/venv/`
+  - Uses `uv` for fast dependency management (10-100x faster than pip)
   - Activate: `python-backend\venv\Scripts\activate` (Windows) or `source python-backend/venv/bin/activate` (Unix)
   - Never install packages globally
   - All Python commands must run with venv activated
@@ -97,6 +98,11 @@ cd python-backend
 venv\Scripts\activate  # or source venv/bin/activate
 pytest
 pytest --cov  # with coverage
+
+# Or run with uv directly (no activation needed)
+cd python-backend
+uv run pytest
+uv run pytest --cov
 
 # Frontend type checking
 npm run check
@@ -590,12 +596,19 @@ When adding file operations, ensure paths are within the configured scope.
 
 ### Updating Dependencies
 
-**Python**:
+**Python** (using uv):
 ```bash
 cd python-backend
 venv\Scripts\activate  # or source venv/bin/activate
-pip install <package>
-pip freeze > requirements.txt
+uv pip install <package>
+uv pip freeze > requirements.txt
+```
+
+Or without activation:
+```bash
+cd python-backend
+uv pip install <package>
+uv pip freeze > requirements.txt
 ```
 
 **Node.js**:

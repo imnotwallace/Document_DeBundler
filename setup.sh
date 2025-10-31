@@ -7,19 +7,18 @@ echo
 
 echo "[1/4] Setting up Python virtual environment..."
 cd python-backend
-python3 -m venv venv
+uv venv
 if [ $? -ne 0 ]; then
     echo "ERROR: Failed to create Python virtual environment"
-    echo "Make sure Python 3.8+ is installed"
+    echo "Make sure uv is installed: pip install uv"
     exit 1
 fi
 
 echo "[2/4] Activating virtual environment..."
 source venv/bin/activate
 
-echo "[3/4] Installing Python dependencies..."
-pip install --upgrade pip
-pip install -r requirements.txt
+echo "[3/4] Installing Python dependencies (with uv - fast!)..."
+uv pip sync requirements.txt
 if [ $? -ne 0 ]; then
     echo "ERROR: Failed to install Python dependencies"
     exit 1

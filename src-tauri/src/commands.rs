@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::api::dialog::blocking::FileDialogBuilder;
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,13 +19,17 @@ pub struct ProcessingStatus {
 
 /// Opens a file dialog for selecting a PDF file
 #[tauri::command]
-pub fn select_pdf_file() -> Result<Option<String>, String> {
-    let file_path = FileDialogBuilder::new()
+pub async fn select_pdf_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    // In Tauri v2, we use the dialog plugin
+    let file_path = app.dialog()
+        .file()
         .add_filter("PDF Files", &["pdf"])
         .set_title("Select PDF Document")
-        .pick_file();
+        .blocking_pick_file();
 
-    Ok(file_path.map(|p| p.to_string_lossy().to_string()))
+    Ok(file_path.map(|p| p.to_string()))
 }
 
 /// Gets information about the selected file
@@ -58,7 +61,7 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
 pub async fn start_processing(
     file_path: String,
     enable_ocr: bool,
-    output_dir: Option<String>,
+    _output_dir: Option<String>,
 ) -> Result<String, String> {
     // TODO: Implement Python subprocess call
     // This will be implemented when we create the Python bridge
@@ -86,4 +89,11 @@ pub fn get_processing_status() -> Result<ProcessingStatus, String> {
         current_operation: "Idle".to_string(),
         progress_percent: 0.0,
     })
+}
+
+/// Quits the application
+#[tauri::command]
+pub fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
 }

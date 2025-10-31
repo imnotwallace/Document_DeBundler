@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/tauri";
+  import { invoke } from "@tauri-apps/api/core";
   import { theme } from "./lib/stores/theme";
-  import { currentModule, navigateToMainMenu, navigateToOCR, navigateToDebundle, navigateToBundle } from "./lib/stores/navigation";
+  import { currentModule, navigateToMainMenu } from "./lib/stores/navigation";
+  import MainMenu from "./lib/components/MainMenu.svelte";
   import Button from "./lib/components/shared/Button.svelte";
   import Modal from "./lib/components/shared/Modal.svelte";
   import ProgressBar from "./lib/components/shared/ProgressBar.svelte";
@@ -62,54 +63,7 @@
   <div class="w-full h-full bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
     {#if $currentModule === 'main_menu'}
       <!-- Main Menu Module -->
-      <div class="container mx-auto px-4 py-8 h-full flex flex-col items-center justify-center">
-        <h1 class="text-5xl font-bold mb-4 text-center text-gray-900 dark:text-white">
-          Sam's PDF OCR and (De)Bundling Tool
-        </h1>
-        <p class="text-lg text-gray-600 dark:text-gray-400 mb-12 text-center">
-          Process, split, and organize PDF documents with OCR capabilities
-        </p>
-
-        <div class="w-full max-w-2xl space-y-4">
-          <!-- OCR Module Button -->
-          <button
-            on:click={navigateToOCR}
-            class="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg p-8 transition-all duration-200 hover:shadow-xl"
-          >
-            <div class="text-2xl font-bold mb-2">OCR Module</div>
-            <div class="text-blue-100 text-sm">
-              Batch OCR processing & queue management
-            </div>
-          </button>
-
-          <!-- De-Bundling Module Button -->
-          <button
-            on:click={navigateToDebundle}
-            class="w-full bg-green-600 hover:bg-green-700 text-white rounded-lg p-8 transition-all duration-200 hover:shadow-xl"
-          >
-            <div class="text-2xl font-bold mb-2">De-Bundling Module</div>
-            <div class="text-green-100 text-sm">
-              Split & organize bundled PDFs with LLM assistance
-            </div>
-          </button>
-
-          <!-- Bundling Module Button (disabled) -->
-          <button
-            disabled
-            class="w-full bg-gray-400 dark:bg-gray-600 text-gray-200 dark:text-gray-400 rounded-lg p-8 cursor-not-allowed opacity-50"
-          >
-            <div class="text-2xl font-bold mb-2">Bundling Module</div>
-            <div class="text-sm">Coming Soon - Disabled</div>
-          </button>
-
-          <!-- Quit Button -->
-          <div class="flex justify-end mt-8">
-            <Button variant="danger" size="md" on:click={() => window.close()}>
-              Quit
-            </Button>
-          </div>
-        </div>
-      </div>
+      <MainMenu />
 
     {:else if $currentModule === 'ocr'}
       <!-- OCR Module (Placeholder - Phase 3) -->
