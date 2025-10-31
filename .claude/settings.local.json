@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python-backend/bin/tesseract/tesseract.exe:*)",
+      "Bash(xargs:*)",
+      "Bash(for dll in liblept libtesseract libarchive libcurl libgcc_s_seh libgomp libiconv libintl libjpeg liblzma libpng16 libstdc++ libtiff libwebp zlib1)",
+      "Bash(do if ls python-backend/bin/tesseract/$dll*.dll)",
+      "Bash(then echo \"✓ $dll\")",
+      "Bash(else echo \"✗ $dll\")",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(python-backend/venv/Scripts/pip.exe list:*)",
+      "Bash(venv/Scripts/pip.exe install:*)",
+      "Bash(python-backend/venv/Scripts/pip.exe:*)",
+      "Bash(python-backend/venv/Scripts/python.exe -m pip install:*)",
+      "mcp__serena__list_dir",
+      "mcp__serena__read_file",
+      "mcp__serena__replace_regex",
+      "Bash(dir:*)",
+      "Bash(python-backend/.venv/Scripts/pip.exe list:*)",
+      "Bash(python-backend/.venv/Scripts/python.exe:*)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "mcp__serena__find_file",
+      "mcp__serena__search_for_pattern",
+      "WebSearch",
+      "WebFetch(domain:paddlepaddle.github.io)",
+      "WebFetch(domain:www.paddleocr.ai)",
+      "Bash(npm run check:*)",
+      "Bash(npm install)",
+      "Bash(npm run dev:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

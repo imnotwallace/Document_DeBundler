@@ -1,0 +1,99 @@
+   3.168336900s  INFO prepare_target{force=false package_id=document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri) target="document-de-bundler"}: cargo::core::compiler::fingerprint: fingerprint error for document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri)/Check { test: false }/TargetInner { name: "document-de-bundler", doc: true, ..: with_path("F:\\Document-De-Bundler\\src-tauri\\src\\main.rs", Edition2021) }
+   3.168488000s  INFO prepare_target{force=false package_id=document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri) target="document-de-bundler"}: cargo::core::compiler::fingerprint:     err: failed to read `F:\Document-De-Bundler\src-tauri\target\debug\.fingerprint\document-de-bundler-8ee8084f2d6defe7\bin-document-de-bundler`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_path
+   6: git_filter_source_path
+   7: git_filter_source_path
+   8: git_filter_source_path
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   3.238350700s  INFO prepare_target{force=false package_id=document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri) target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint error for document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri)/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "F:\\Document-De-Bundler\\src-tauri\\build.rs", Edition2021) }
+   3.238413600s  INFO prepare_target{force=false package_id=document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri) target="build-script-build"}: cargo::core::compiler::fingerprint:     err: failed to read `F:\Document-De-Bundler\src-tauri\target\debug\.fingerprint\document-de-bundler-6dbaa0af34b5fc6b\run-build-script-build-script-build`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_path
+   6: git_filter_source_repo
+   7: git_filter_source_path
+   8: git_filter_source_path
+   9: git_filter_source_path
+  10: git_filter_source_path
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_filter_source_repo
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   7.068747700s  INFO prepare_target{force=false package_id=document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri) target="document-de-bundler"}: cargo::core::compiler::fingerprint: fingerprint error for document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri)/Check { test: true }/TargetInner { name: "document-de-bundler", doc: true, ..: with_path("F:\\Document-De-Bundler\\src-tauri\\src\\main.rs", Edition2021) }
+   7.068840200s  INFO prepare_target{force=false package_id=document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri) target="document-de-bundler"}: cargo::core::compiler::fingerprint:     err: failed to read `F:\Document-De-Bundler\src-tauri\target\debug\.fingerprint\document-de-bundler-6f39b16db48d7e5c\test-bin-document-de-bundler`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_path
+   6: git_filter_source_path
+   7: git_filter_source_path
+   8: git_filter_source_path
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   Compiling document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri)
+error: failed to run custom build command for `document-de-bundler v0.1.0 (F:\Document-De-Bundler\src-tauri)`
+note: To improve backtraces for build dependencies, set the CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true environment variable to enable debug information generation.
+
+Caused by:
+  process didn't exit successfully: `F:\Document-De-Bundler\src-tauri\target\debug\build\document-de-bundler-2822bd87d2e7ae5a\build-script-build` (exit code: 1)
+  --- stdout
+  cargo:rerun-if-env-changed=TAURI_CONFIG
+  cargo:rerun-if-changed=tauri.conf.json
+  cargo:rustc-check-cfg=cfg(desktop)
+  cargo:rustc-cfg=desktop
+  cargo:rustc-check-cfg=cfg(mobile)
+  invalid type: map, expected a boolean

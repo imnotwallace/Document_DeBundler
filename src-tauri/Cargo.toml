@@ -1,0 +1,20 @@
+[package]
+name = "document-de-bundler"
+version = "0.1.0"
+description = "Desktop application for OCR, splitting, and bundling PDF documents"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.5", features = ["dialog-all", "fs-all", "path-all", "process-all", "shell-open"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

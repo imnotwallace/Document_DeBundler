@@ -1,0 +1,219 @@
+<script lang="ts">
+  import { invoke } from "@tauri-apps/api/tauri";
+  import { theme } from "./lib/stores/theme";
+  import { currentModule, navigateToMainMenu, navigateToOCR, navigateToDebundle, navigateToBundle } from "./lib/stores/navigation";
+  import Button from "./lib/components/shared/Button.svelte";
+  import Modal from "./lib/components/shared/Modal.svelte";
+  import ProgressBar from "./lib/components/shared/ProgressBar.svelte";
+
+  // Existing state from original App.svelte
+  let selectedFile: string | null = null;
+  let fileInfo: any = null;
+  let isProcessing = false;
+  let enableOCR = true;
+
+  // Existing functions from original App.svelte
+  async function selectFile() {
+    try {
+      const filePath = await invoke<string | null>("select_pdf_file");
+      if (filePath) {
+        selectedFile = filePath;
+        fileInfo = await invoke("get_file_info", { filePath });
+      }
+    } catch (error) {
+      console.error("Failed to select file:", error);
+      alert(`Error: ${error}`);
+    }
+  }
+
+  async function startProcessing() {
+    if (!selectedFile) {
+      alert("Please select a PDF file first");
+      return;
+    }
+
+    try {
+      isProcessing = true;
+      const result = await invoke("start_processing", {
+        filePath: selectedFile,
+        enableOcr: enableOCR,
+        outputDir: null,
+      });
+      console.log("Processing result:", result);
+      alert(result);
+    } catch (error) {
+      console.error("Processing failed:", error);
+      alert(`Error: ${error}`);
+    } finally {
+      isProcessing = false;
+    }
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + " KB";
+    if (bytes < 1024 * 1024 * 1024)
+      return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  }
+</script>
+
+<main class={$theme === 'dark' ? 'dark' : ''}>
+  <div class="w-full h-full bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+    {#if $currentModule === 'main_menu'}
+      <!-- Main Menu Module -->
+      <div class="container mx-auto px-4 py-8 h-full flex flex-col items-center justify-center">
+        <h1 class="text-5xl font-bold mb-4 text-center text-gray-900 dark:text-white">
+          Sam's PDF OCR and (De)Bundling Tool
+        </h1>
+        <p class="text-lg text-gray-600 dark:text-gray-400 mb-12 text-center">
+          Process, split, and organize PDF documents with OCR capabilities
+        </p>
+
+        <div class="w-full max-w-2xl space-y-4">
+          <!-- OCR Module Button -->
+          <button
+            on:click={navigateToOCR}
+            class="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg p-8 transition-all duration-200 hover:shadow-xl"
+          >
+            <div class="text-2xl font-bold mb-2">OCR Module</div>
+            <div class="text-blue-100 text-sm">
+              Batch OCR processing & queue management
+            </div>
+          </button>
+
+          <!-- De-Bundling Module Button -->
+          <button
+            on:click={navigateToDebundle}
+            class="w-full bg-green-600 hover:bg-green-700 text-white rounded-lg p-8 transition-all duration-200 hover:shadow-xl"
+          >
+            <div class="text-2xl font-bold mb-2">De-Bundling Module</div>
+            <div class="text-green-100 text-sm">
+              Split & organize bundled PDFs with LLM assistance
+            </div>
+          </button>
+
+          <!-- Bundling Module Button (disabled) -->
+          <button
+            disabled
+            class="w-full bg-gray-400 dark:bg-gray-600 text-gray-200 dark:text-gray-400 rounded-lg p-8 cursor-not-allowed opacity-50"
+          >
+            <div class="text-2xl font-bold mb-2">Bundling Module</div>
+            <div class="text-sm">Coming Soon - Disabled</div>
+          </button>
+
+          <!-- Quit Button -->
+          <div class="flex justify-end mt-8">
+            <Button variant="danger" size="md" on:click={() => window.close()}>
+              Quit
+            </Button>
+          </div>
+        </div>
+      </div>
+
+    {:else if $currentModule === 'ocr'}
+      <!-- OCR Module (Placeholder - Phase 3) -->
+      <div class="h-full flex flex-col">
+        <!-- Header -->
+        <div class="bg-gray-100 dark:bg-gray-800 border-b border-gray-300 dark:border-gray-700 px-6 py-4">
+          <div class="flex items-center justify-between">
+            <Button variant="secondary" size="sm" on:click={navigateToMainMenu}>
+              ← Return to Main Menu
+            </Button>
+            <h2 class="text-2xl font-bold text-gray-900 dark:text-white">OCR Module</h2>
+            <div class="w-40"></div> <!-- Spacer for centering -->
+          </div>
+        </div>
+
+        <!-- Content -->
+        <div class="flex-1 p-8">
+          <div class="max-w-4xl mx-auto">
+            <div class="bg-blue-50 dark:bg-blue-900/20 border-2 border-blue-300 dark:border-blue-700 rounded-lg p-8 text-center">
+              <h3 class="text-xl font-semibold mb-4 text-blue-900 dark:text-blue-100">
+                OCR Module - Phase 3
+              </h3>
+              <p class="text-blue-800 dark:text-blue-200 mb-4">
+                This module will be implemented in Phase 3 with:
+              </p>
+              <ul class="text-left text-blue-700 dark:text-blue-300 space-y-2 max-w-md mx-auto">
+                <li>✓ Batch OCR processing queue</li>
+                <li>✓ File grid with sorting and selection</li>
+                <li>✓ Real-time progress tracking</li>
+                <li>✓ Verbose terminal output</li>
+                <li>✓ Destination folder selection</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    {:else if $currentModule === 'debundle'}
+      <!-- De-Bundling Module (Placeholder - Phase 4) -->
+      <div class="h-full flex flex-col">
+        <!-- Header -->
+        <div class="bg-gray-100 dark:bg-gray-800 border-b border-gray-300 dark:border-gray-700 px-6 py-4">
+          <div class="flex items-center justify-between">
+            <Button variant="secondary" size="sm" on:click={navigateToMainMenu}>
+              ← Return to Main Menu
+            </Button>
+            <h2 class="text-2xl font-bold text-gray-900 dark:text-white">De-Bundling Module</h2>
+            <div class="w-40"></div> <!-- Spacer -->
+          </div>
+        </div>
+
+        <!-- Content -->
+        <div class="flex-1 p-8">
+          <div class="max-w-4xl mx-auto">
+            <div class="bg-green-50 dark:bg-green-900/20 border-2 border-green-300 dark:border-green-700 rounded-lg p-8 text-center">
+              <h3 class="text-xl font-semibold mb-4 text-green-900 dark:text-green-100">
+                De-Bundling Module - Phase 4
+              </h3>
+              <p class="text-green-800 dark:text-green-200 mb-4">
+                This module will be implemented in Phase 4 with:
+              </p>
+              <ul class="text-left text-green-700 dark:text-green-300 space-y-2 max-w-md mx-auto">
+                <li>✓ File selection with drag & drop</li>
+                <li>✓ LLM-powered boundary detection</li>
+                <li>✓ Document grid editor with metadata</li>
+                <li>✓ PDF preview panel</li>
+                <li>✓ Smart file naming and organization</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    {:else if $currentModule === 'bundle'}
+      <!-- Bundling Module (Placeholder - Future) -->
+      <div class="h-full flex flex-col">
+        <!-- Header -->
+        <div class="bg-gray-100 dark:bg-gray-800 border-b border-gray-300 dark:border-gray-700 px-6 py-4">
+          <div class="flex items-center justify-between">
+            <Button variant="secondary" size="sm" on:click={navigateToMainMenu}>
+              ← Return to Main Menu
+            </Button>
+            <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Bundling Module</h2>
+            <div class="w-40"></div> <!-- Spacer -->
+          </div>
+        </div>
+
+        <!-- Content -->
+        <div class="flex-1 p-8">
+          <div class="max-w-4xl mx-auto">
+            <div class="bg-gray-50 dark:bg-gray-800 border-2 border-gray-300 dark:border-gray-700 rounded-lg p-8 text-center">
+              <h3 class="text-xl font-semibold mb-4 text-gray-900 dark:text-gray-100">
+                Bundling Module
+              </h3>
+              <p class="text-gray-700 dark:text-gray-300 mb-4">
+                Coming Soon
+              </p>
+              <p class="text-gray-600 dark:text-gray-400">
+                This feature will allow you to combine multiple PDF documents into a single file.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+  </div>
+</main>

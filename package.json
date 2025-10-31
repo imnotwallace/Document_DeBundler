@@ -1,0 +1,33 @@
+{
+  "name": "document-de-bundler",
+  "version": "0.1.0",
+  "description": "Desktop application for OCR, splitting, and bundling PDF documents",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^1.5.3",
+    "@tauri-apps/plugin-dialog": "^1.0.0",
+    "@tauri-apps/plugin-fs": "^1.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.0.1",
+    "@tauri-apps/cli": "^1.5.9",
+    "@tsconfig/svelte": "^5.0.2",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.33",
+    "svelte": "^4.2.8",
+    "svelte-check": "^3.6.3",
+    "tailwindcss": "^3.4.1",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.11"
+  }
+}

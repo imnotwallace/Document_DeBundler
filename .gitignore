@@ -1,0 +1,58 @@
+# Python
+python-backend/venv/
+python-backend/__pycache__/
+python-backend/**/__pycache__/
+python-backend/*.pyc
+python-backend/.pytest_cache/
+python-backend/.coverage
+python-backend/htmlcov/
+python-backend/*.egg-info/
+python-backend/dist/
+python-backend/build/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+dist-ssr/
+*.local
+
+# Tauri
+src-tauri/target/
+src-tauri/Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# OCR Models (auto-downloaded or user-provided)
+python-backend/models/*
+!python-backend/models/README.md
+!python-backend/models/.gitkeep

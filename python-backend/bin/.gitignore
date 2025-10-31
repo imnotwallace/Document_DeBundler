@@ -1,0 +1,16 @@
+# Ignore bundled binaries (too large for git)
+# Users must download and place binaries themselves
+# See README.md for instructions
+
+# Tesseract executable and dependencies
+tesseract/tesseract.exe
+tesseract/*.dll
+
+# Tesseract language data files (large)
+tesseract/tessdata/*.traineddata
+
+# Allow directory structure and documentation
+!tesseract/
+!tesseract/tessdata/
+!README.md
+!.gitignore
