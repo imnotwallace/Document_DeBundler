@@ -6,6 +6,7 @@ pub struct FileInfo {
     pub path: String,
     pub name: String,
     pub size: u64,
+    pub page_count: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,6 +33,36 @@ pub async fn select_pdf_file(app: tauri::AppHandle) -> Result<Option<String>, St
     Ok(file_path.map(|p| p.to_string()))
 }
 
+/// Opens a file dialog for selecting multiple PDF files
+#[tauri::command]
+pub async fn select_multiple_pdf_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let file_paths = app.dialog()
+        .file()
+        .add_filter("PDF Files", &["pdf"])
+        .set_title("Select PDF Documents")
+        .blocking_pick_files();
+
+    match file_paths {
+        Some(paths) => Ok(paths.into_iter().map(|p| p.to_string()).collect()),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Opens a folder selection dialog
+#[tauri::command]
+pub async fn select_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let folder_path = app.dialog()
+        .file()
+        .set_title("Select Destination Folder")
+        .blocking_pick_folder();
+
+    Ok(folder_path.map(|p| p.to_string()))
+}
+
 /// Gets information about the selected file
 #[tauri::command]
 pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
@@ -50,10 +81,19 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
         .to_string();
 
     Ok(FileInfo {
-        path: file_path,
+        path: file_path.clone(),
         name,
         size: metadata.len(),
+        page_count: None, // TODO: Get actual page count via Python bridge
     })
+}
+
+/// Gets the page count of a PDF file
+#[tauri::command]
+pub fn get_pdf_page_count(file_path: String) -> Result<Option<u32>, String> {
+    // TODO: Implement via Python bridge
+    // For now, return None until Python bridge is set up
+    Ok(None)
 }
 
 /// Starts PDF processing via Python backend

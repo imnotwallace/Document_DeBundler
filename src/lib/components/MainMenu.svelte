@@ -17,7 +17,7 @@
 <div class="container mx-auto px-4 py-8 h-full flex flex-col items-center justify-center">
   <!-- Title -->
   <h1 class="text-5xl font-bold mb-4 text-center text-gray-900 dark:text-white">
-    Sam's PDF OCR and (De)Bundling Tool
+    Document De-Bundler
   </h1>
   <p class="text-lg text-gray-600 dark:text-gray-400 mb-12 text-center">
     Process, split, and organize PDF documents with OCR capabilities

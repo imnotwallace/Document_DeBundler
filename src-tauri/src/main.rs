@@ -14,7 +14,10 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             select_pdf_file,
+            select_multiple_pdf_files,
+            select_folder,
             get_file_info,
+            get_pdf_page_count,
             start_processing,
             cancel_processing,
             get_processing_status,

@@ -3,6 +3,7 @@
   import { theme } from "./lib/stores/theme";
   import { currentModule, navigateToMainMenu } from "./lib/stores/navigation";
   import MainMenu from "./lib/components/MainMenu.svelte";
+  import OCRModule from "./lib/components/OCRModule.svelte";
   import Button from "./lib/components/shared/Button.svelte";
   import Modal from "./lib/components/shared/Modal.svelte";
   import ProgressBar from "./lib/components/shared/ProgressBar.svelte";
@@ -12,6 +13,17 @@
   let fileInfo: any = null;
   let isProcessing = false;
   let enableOCR = true;
+
+  // Apply theme class to document root for Tailwind dark mode
+  $: {
+    if (typeof document !== 'undefined') {
+      if ($theme === 'dark') {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    }
+  }
 
   // Existing functions from original App.svelte
   async function selectFile() {
@@ -59,47 +71,15 @@
   }
 </script>
 
-<main class={$theme === 'dark' ? 'dark' : ''}>
+<main class="w-full h-full">
   <div class="w-full h-full bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
     {#if $currentModule === 'main_menu'}
       <!-- Main Menu Module -->
       <MainMenu />
 
     {:else if $currentModule === 'ocr'}
-      <!-- OCR Module (Placeholder - Phase 3) -->
-      <div class="h-full flex flex-col">
-        <!-- Header -->
-        <div class="bg-gray-100 dark:bg-gray-800 border-b border-gray-300 dark:border-gray-700 px-6 py-4">
-          <div class="flex items-center justify-between">
-            <Button variant="secondary" size="sm" on:click={navigateToMainMenu}>
-              ← Return to Main Menu
-            </Button>
-            <h2 class="text-2xl font-bold text-gray-900 dark:text-white">OCR Module</h2>
-            <div class="w-40"></div> <!-- Spacer for centering -->
-          </div>
-        </div>
-
-        <!-- Content -->
-        <div class="flex-1 p-8">
-          <div class="max-w-4xl mx-auto">
-            <div class="bg-blue-50 dark:bg-blue-900/20 border-2 border-blue-300 dark:border-blue-700 rounded-lg p-8 text-center">
-              <h3 class="text-xl font-semibold mb-4 text-blue-900 dark:text-blue-100">
-                OCR Module - Phase 3
-              </h3>
-              <p class="text-blue-800 dark:text-blue-200 mb-4">
-                This module will be implemented in Phase 3 with:
-              </p>
-              <ul class="text-left text-blue-700 dark:text-blue-300 space-y-2 max-w-md mx-auto">
-                <li>✓ Batch OCR processing queue</li>
-                <li>✓ File grid with sorting and selection</li>
-                <li>✓ Real-time progress tracking</li>
-                <li>✓ Verbose terminal output</li>
-                <li>✓ Destination folder selection</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </div>
+      <!-- OCR Module -->
+      <OCRModule />
 
     {:else if $currentModule === 'debundle'}
       <!-- De-Bundling Module (Placeholder - Phase 4) -->

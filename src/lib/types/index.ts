@@ -26,6 +26,12 @@ export interface OCRQueueItem {
   error?: string;
 }
 
+// Sort configuration for OCR queue
+export interface SortConfig {
+  column: 'fileName' | 'pages' | 'size' | 'status';
+  direction: 'asc' | 'desc';
+}
+
 // Document row for de-bundling grid
 export interface DocumentRow {
   id: number;
