@@ -1,5 +1,38 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tauri::State;
+use serde_json;
+
+use crate::python_bridge::{PythonProcess, PythonCommand};
+
+/// Application state holding the Python process and processing status
+pub struct AppState {
+    pub python_process: Arc<Mutex<PythonProcess>>,
+    pub status: Arc<Mutex<ProcessingStatusInternal>>,
+}
+
+/// Internal processing status
+#[derive(Debug, Clone)]
+pub struct ProcessingStatusInternal {
+    pub is_running: bool,
+    pub current_page: u32,
+    pub total_pages: u32,
+    pub current_operation: String,
+    pub progress_percent: f32,
+}
+
+impl Default for ProcessingStatusInternal {
+    fn default() -> Self {
+        Self {
+            is_running: false,
+            current_page: 0,
+            total_pages: 0,
+            current_operation: "Idle".to_string(),
+            progress_percent: 0.0,
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -65,7 +98,7 @@ pub async fn select_folder(app: tauri::AppHandle) -> Result<Option<String>, Stri
 
 /// Gets information about the selected file
 #[tauri::command]
-pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
+pub async fn get_file_info(file_path: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<FileInfo, String> {
     let path = PathBuf::from(&file_path);
 
     if !path.exists() {
@@ -80,20 +113,100 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
         .unwrap_or("unknown")
         .to_string();
 
+    // Try to get page count via Python
+    let page_count = get_pdf_page_count(file_path.clone(), app, state).await.ok().flatten();
+
     Ok(FileInfo {
         path: file_path.clone(),
         name,
         size: metadata.len(),
-        page_count: None, // TODO: Get actual page count via Python bridge
+        page_count,
     })
 }
 
-/// Gets the page count of a PDF file
+/// Gets the page count of a PDF file via Python backend
 #[tauri::command]
-pub fn get_pdf_page_count(file_path: String) -> Result<Option<u32>, String> {
-    // TODO: Implement via Python bridge
-    // For now, return None until Python bridge is set up
-    Ok(None)
+pub async fn get_pdf_page_count(file_path: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<u32>, String> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    // Validate file path
+    let path = PathBuf::from(&file_path);
+    if !path.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+    if !file_path.to_lowercase().ends_with(".pdf") {
+        return Err("File must be a PDF".to_string());
+    }
+
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            // Start Python process
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }
+
+    // Send analyze command
+    let command = PythonCommand {
+        command: "analyze".to_string(),
+        file_path: Some(file_path.clone()),
+        options: None,
+    };
+
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.send_command(command)?;
+    }
+
+    // Wait for result with timeout (30 seconds should be enough for analysis)
+    let result = timeout(Duration::from_secs(30), async {
+        loop {
+            let event = {
+                let process = state.python_process.lock()
+                    .map_err(|e| format!("Failed to lock process: {}", e))?;
+                process.read_event()?
+            };
+
+            if let Some(evt) = event {
+                match evt.event_type.as_str() {
+                    "result" => {
+                        // Extract page count from result
+                        if let Some(total_pages) = evt.data.get("total_pages") {
+                            if let Some(count) = total_pages.as_u64() {
+                                return Ok(Some(count as u32));
+                            }
+                        }
+                        return Ok(None);
+                    }
+                    "error" => {
+                        let msg = evt.data.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown error");
+                        return Err(format!("Python error: {}", msg));
+                    }
+                    _ => {
+                        // Ignore progress events
+                        continue;
+                    }
+                }
+            }
+
+            // Small delay to prevent busy waiting
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await;
+
+    match result {
+        Ok(Ok(page_count)) => Ok(page_count),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Timeout waiting for page count".to_string()),
+    }
 }
 
 /// Starts PDF processing via Python backend
@@ -101,33 +214,214 @@ pub fn get_pdf_page_count(file_path: String) -> Result<Option<u32>, String> {
 pub async fn start_processing(
     file_path: String,
     enable_ocr: bool,
-    _output_dir: Option<String>,
+    output_dir: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // TODO: Implement Python subprocess call
-    // This will be implemented when we create the Python bridge
-    Ok(format!(
-        "Processing started for: {} (OCR: {})",
-        file_path, enable_ocr
-    ))
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }  // Lock drops here
+
+    // Start event loop in separate scope to avoid deadlock
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Build options
+    let mut options = serde_json::Map::new();
+    options.insert("force_ocr".to_string(), serde_json::Value::Bool(enable_ocr));
+
+    if let Some(dir) = output_dir {
+        options.insert("output_dir".to_string(), serde_json::Value::String(dir));
+    }
+
+    // Send process command
+    let command = PythonCommand {
+        command: "process".to_string(),
+        file_path: Some(file_path.clone()),
+        options: Some(serde_json::Value::Object(options)),
+    };
+
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.send_command(command)?;
+    }
+
+    // Update status
+    {
+        let mut status = state.status.lock()
+            .map_err(|e| format!("Failed to lock status: {}", e))?;
+        status.is_running = true;
+        status.current_operation = "Starting processing...".to_string();
+        status.progress_percent = 0.0;
+    }
+
+    Ok(format!("Processing started for: {}", file_path))
+}
+
+/// Starts batch OCR processing for multiple files
+#[tauri::command]
+pub async fn start_batch_ocr(
+    files: Vec<String>,
+    destination: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if files.is_empty() {
+        return Err("No files provided".to_string());
+    }
+
+    // Validate all file paths exist and are PDFs
+    for file in &files {
+        let path = PathBuf::from(file);
+        if !path.exists() {
+            return Err(format!("File not found: {}", file));
+        }
+        if !file.to_lowercase().ends_with(".pdf") {
+            return Err(format!("File must be a PDF: {}", file));
+        }
+    }
+
+    // Validate destination directory exists
+    let dest_path = PathBuf::from(&destination);
+    if !dest_path.exists() {
+        return Err(format!("Destination directory not found: {}", destination));
+    }
+    if !dest_path.is_dir() {
+        return Err(format!("Destination must be a directory: {}", destination));
+    }
+
+    // Check if already processing
+    {
+        let status = state.status.lock()
+            .map_err(|e| format!("Failed to lock status: {}", e))?;
+        if status.is_running {
+            return Err("Already processing. Please wait or cancel current operation.".to_string());
+        }
+    }
+
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }  // Lock drops here
+
+    // Start event loop in separate scope to avoid deadlock
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Build options for batch processing
+    let mut options = serde_json::Map::new();
+    options.insert("files".to_string(), serde_json::Value::Array(
+        files.iter().map(|f| serde_json::Value::String(f.clone())).collect()
+    ));
+    options.insert("output_dir".to_string(), serde_json::Value::String(destination.clone()));
+
+    // Send batch command
+    let command = PythonCommand {
+        command: "ocr_batch".to_string(),
+        file_path: None,
+        options: Some(serde_json::Value::Object(options)),
+    };
+
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.send_command(command)?;
+    }
+
+    // Update status
+    {
+        let mut status = state.status.lock()
+            .map_err(|e| format!("Failed to lock status: {}", e))?;
+        status.is_running = true;
+        status.total_pages = files.len() as u32;
+        status.current_operation = "Starting batch OCR...".to_string();
+        status.progress_percent = 0.0;
+    }
+
+    Ok(format!("Batch OCR started for {} files", files.len()))
 }
 
 /// Cancels the current processing operation
 #[tauri::command]
-pub fn cancel_processing() -> Result<(), String> {
-    // TODO: Implement cancellation logic
-    Ok(())
+pub async fn cancel_processing(state: State<'_, AppState>) -> Result<String, String> {
+    // Check if currently processing
+    {
+        let status = state.status.lock()
+            .map_err(|e| format!("Failed to lock status: {}", e))?;
+        if !status.is_running {
+            return Err("No processing operation in progress".to_string());
+        }
+    }
+
+    // Send cancel command to Python
+    let command = PythonCommand {
+        command: "cancel".to_string(),
+        file_path: None,
+        options: None,
+    };
+
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if process.is_running() {
+            process.send_command(command)?;
+        }
+    }
+
+    // Update status
+    {
+        let mut status = state.status.lock()
+            .map_err(|e| format!("Failed to lock status: {}", e))?;
+        status.is_running = false;
+        status.current_operation = "Cancelled".to_string();
+    }
+
+    Ok("Cancellation requested".to_string())
+}
+
+/// Cancels batch OCR operation (alias for cancel_processing)
+#[tauri::command]
+pub async fn cancel_batch_ocr(state: State<'_, AppState>) -> Result<String, String> {
+    cancel_processing(state).await
 }
 
 /// Gets the current processing status
 #[tauri::command]
-pub fn get_processing_status() -> Result<ProcessingStatus, String> {
-    // TODO: Implement status retrieval from Python process
+pub async fn get_processing_status(state: State<'_, AppState>) -> Result<ProcessingStatus, String> {
+    let status = state.status.lock()
+        .map_err(|e| format!("Failed to lock status: {}", e))?;
+
     Ok(ProcessingStatus {
-        is_running: false,
-        current_page: 0,
-        total_pages: 0,
-        current_operation: "Idle".to_string(),
-        progress_percent: 0.0,
+        is_running: status.is_running,
+        current_page: status.current_page,
+        total_pages: status.total_pages,
+        current_operation: status.current_operation.clone(),
+        progress_percent: status.progress_percent,
     })
 }
 
@@ -136,4 +430,51 @@ pub fn get_processing_status() -> Result<ProcessingStatus, String> {
 pub fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     app.exit(0);
     Ok(())
+}
+
+/// Helper function to get the Python script path
+/// In development: use python-backend/main.py (navigate from src-tauri to project root)
+/// In production: use bundled script in resources
+fn get_python_script_path(_app: &tauri::AppHandle) -> Result<String, String> {
+    // For development, use the local python-backend directory
+    #[cfg(debug_assertions)]
+    {
+        let current_dir = std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?;
+
+        // In dev mode, current_dir is src-tauri/, so navigate up to project root
+        let project_root = current_dir.parent()
+            .ok_or_else(|| "Failed to get parent directory".to_string())?;
+
+        let script_path = project_root.join("python-backend").join("main.py");
+
+        if !script_path.exists() {
+            return Err(format!(
+                "Python script not found at: {}. Current dir: {}, Project root: {}",
+                script_path.display(),
+                current_dir.display(),
+                project_root.display()
+            ));
+        }
+
+        Ok(script_path.to_string_lossy().to_string())
+    }
+
+    // For production, use the bundled resource
+    #[cfg(not(debug_assertions))]
+    {
+        // Use Tauri's resource resolver for production builds
+        let resource_path = _app.path()
+            .resolve("python-backend/main.py", tauri::path::BaseDirectory::Resource)
+            .map_err(|e| format!("Failed to resolve resource path: {}", e))?;
+
+        if !resource_path.exists() {
+            return Err(format!(
+                "Python script not found in resources: {}",
+                resource_path.display()
+            ));
+        }
+
+        Ok(resource_path.to_string_lossy().to_string())
+    }
 }

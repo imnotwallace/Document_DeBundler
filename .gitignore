@@ -1,5 +1,6 @@
 # Python
 python-backend/venv/
+python-backend/.venv/
 python-backend/__pycache__/
 python-backend/**/__pycache__/
 python-backend/*.pyc
@@ -63,6 +64,47 @@ docs/handoff/
 docs/HANDOFF_*.md
 
 # OCR Models (auto-downloaded or user-provided)
-python-backend/models/*
+# Keep directory structure but ignore model files
+python-backend/models/det/*.pdiparams
+python-backend/models/det/*.pdmodel
+python-backend/models/det/*.pdopt
+python-backend/models/det/*.yml
+python-backend/models/det/*.json
+python-backend/models/rec/*.pdiparams
+python-backend/models/rec/*.pdmodel
+python-backend/models/rec/*.pdopt
+python-backend/models/rec/*.yml
+python-backend/models/rec/*.json
+python-backend/models/cls/*.pdiparams
+python-backend/models/cls/*.pdmodel
+python-backend/models/cls/*.pdopt
+python-backend/models/cls/*.yml
+python-backend/models/cls/*.json
+python-backend/models/*.tar
+python-backend/models/temp_extract/
+
+# Embedding Models (auto-downloaded or user-provided)
+# Keep directory structure but ignore model files
+python-backend/models/embeddings/text/
+python-backend/models/embeddings/vision/
+# But keep the directory markers and documentation
+!python-backend/models/embeddings/.gitkeep
+!python-backend/models/embeddings/README.md
+
+# Keep documentation
 !python-backend/models/README.md
 !python-backend/models/.gitkeep
+
+# LLM Models
+python-backend/models/llm/
+
+# CUDA/cuDNN libraries (downloaded separately)
+python-backend/cudnn-*/
+python-backend/*.zip
+
+# Llama.cpp binaries
+python-backend/bin/llama-cpp/
+
+# AI coder context
+.ai-coder-context/
+.serena/

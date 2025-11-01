@@ -1,7 +1,25 @@
 use serde::{Deserialize, Serialize};
-use std::process::{Child, Command, Stdio};
-use std::io::{BufReader, BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter};
+use tokio::time::timeout;
 
+/// Represents the current state of the Python process
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ProcessState {
+    /// Process is idle, not running
+    Idle,
+    /// Process is running and processing commands
+    Running,
+    /// Process has been cancelled by user
+    Cancelled,
+    /// Process encountered an error
+    Error(String),
+}
+
+/// Command structure sent to Python process
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PythonCommand {
     pub command: String,
@@ -9,27 +27,67 @@ pub struct PythonCommand {
     pub options: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Event structure received from Python process
+/// Python sends events as: {"type": "progress|result|error", "data": {...}}
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PythonEvent {
+    #[serde(rename = "type")]
     pub event_type: String,
     pub data: serde_json::Value,
 }
 
-pub struct PythonProcess {
+/// Internal process state with thread-safe access
+struct ProcessInternals {
     child: Option<Child>,
+    stdout_reader: Option<BufReader<ChildStdout>>,
+    state: ProcessState,
+    event_loop_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Python process manager with async event streaming support
+pub struct PythonProcess {
+    internals: Arc<Mutex<ProcessInternals>>,
 }
 
 impl PythonProcess {
+    /// Creates a new Python process manager
     pub fn new() -> Self {
-        PythonProcess { child: None }
+        PythonProcess {
+            internals: Arc::new(Mutex::new(ProcessInternals {
+                child: None,
+                stdout_reader: None,
+                state: ProcessState::Idle,
+                event_loop_handle: None,
+            })),
+        }
     }
 
     /// Starts the Python backend process
-    pub fn start(&mut self, python_script_path: &str) -> Result<(), String> {
-        // TODO: Detect Python executable (venv or system)
-        // For now, we'll use 'python' and assume it's in PATH or venv is activated
+    ///
+    /// # Arguments
+    /// * `python_script_path` - Path to the Python main.py script
+    ///
+    /// # Returns
+    /// * `Ok(())` if process started successfully
+    /// * `Err(String)` with error description if startup failed
+    pub fn start(&self, python_script_path: &str) -> Result<(), String> {
+        let mut internals = self
+            .internals
+            .lock()
+            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
-        let child = Command::new("python")
+        // Check if already running
+        if let Some(ref mut child) = internals.child {
+            if let Ok(None) = child.try_wait() {
+                return Err("Python process already running".to_string());
+            }
+        }
+
+        // Get Python executable from venv
+        let python_exe = get_venv_python_path()?;
+
+        // Spawn Python process with piped stdio
+        let mut child = Command::new(&python_exe)
             .arg(python_script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -37,13 +95,47 @@ impl PythonProcess {
             .spawn()
             .map_err(|e| format!("Failed to start Python process: {}", e))?;
 
-        self.child = Some(child);
+        // Take stdout and create a persistent BufReader
+        let stdout = child.stdout.take()
+            .ok_or_else(|| "Failed to capture stdout".to_string())?;
+        let reader = BufReader::new(stdout);
+
+        // Spawn stderr monitoring task for debugging (using blocking I/O)
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(stderr);
+
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        eprintln!("[Python stderr] {}", line);
+                    }
+                }
+            });
+        }
+
+        internals.child = Some(child);
+        internals.stdout_reader = Some(reader);
+        internals.state = ProcessState::Running;
+
         Ok(())
     }
 
     /// Sends a command to the Python process via stdin
-    pub fn send_command(&mut self, command: PythonCommand) -> Result<(), String> {
-        if let Some(ref mut child) = self.child {
+    ///
+    /// # Arguments
+    /// * `command` - The command structure to send
+    ///
+    /// # Returns
+    /// * `Ok(())` if command was sent successfully
+    /// * `Err(String)` if send failed
+    pub fn send_command(&self, command: PythonCommand) -> Result<(), String> {
+        let mut internals = self
+            .internals
+            .lock()
+            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+        if let Some(ref mut child) = internals.child {
             if let Some(ref mut stdin) = child.stdin {
                 let command_json = serde_json::to_string(&command)
                     .map_err(|e| format!("Failed to serialize command: {}", e))?;
@@ -51,7 +143,8 @@ impl PythonProcess {
                 writeln!(stdin, "{}", command_json)
                     .map_err(|e| format!("Failed to write to stdin: {}", e))?;
 
-                stdin.flush()
+                stdin
+                    .flush()
                     .map_err(|e| format!("Failed to flush stdin: {}", e))?;
 
                 Ok(())
@@ -63,38 +156,373 @@ impl PythonProcess {
         }
     }
 
-    /// Reads events from Python process stdout (non-blocking approach needed)
-    pub fn read_event(&mut self) -> Result<Option<PythonEvent>, String> {
-        if let Some(ref mut child) = self.child {
-            if let Some(ref mut stdout) = child.stdout {
-                let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
+    /// Starts the async event loop for streaming events from Python
+    ///
+    /// This method spawns a background task that continuously reads events from
+    /// Python's stdout and emits them to the frontend via Tauri's event system.
+    ///
+    /// Events are emitted as:
+    /// - "python_progress" - Progress updates
+    /// - "python_result" - Processing results
+    /// - "python_error" - Error messages
+    ///
+    /// # Arguments
+    /// * `app_handle` - Tauri app handle for emitting events
+    ///
+    /// # Returns
+    /// * `Ok(())` if event loop started successfully
+    /// * `Err(String)` if startup failed
+    pub fn start_event_loop(&self, app_handle: AppHandle) -> Result<(), String> {
+        let internals_clone = Arc::clone(&self.internals);
 
-                match reader.read_line(&mut line) {
-                    Ok(0) => Ok(None), // EOF
-                    Ok(_) => {
-                        let event: PythonEvent = serde_json::from_str(&line)
-                            .map_err(|e| format!("Failed to parse event: {}", e))?;
-                        Ok(Some(event))
+        // Spawn async task for event streaming
+        let handle = tokio::spawn(async move {
+            eprintln!("[INFO] Python event loop started");
+
+            loop {
+                // Check process state
+                let should_continue = {
+                    let internals = match internals_clone.lock() {
+                        Ok(i) => i,
+                        Err(e) => {
+                            eprintln!("Failed to acquire lock in event loop: {}", e);
+                            break;
+                        }
+                    };
+
+                    match internals.state {
+                        ProcessState::Running => true,
+                        ProcessState::Cancelled => {
+                            eprintln!("Event loop stopped: Processing cancelled");
+                            let _ = app_handle.emit(
+                                "python_error",
+                                PythonEvent {
+                                    event_type: "error".to_string(),
+                                    data: serde_json::json!({
+                                        "message": "Processing cancelled by user"
+                                    }),
+                                },
+                            );
+                            false
+                        }
+                        ProcessState::Error(ref msg) => {
+                            eprintln!("Event loop stopped: Error - {}", msg);
+                            let _ = app_handle.emit(
+                                "python_error",
+                                PythonEvent {
+                                    event_type: "error".to_string(),
+                                    data: serde_json::json!({
+                                        "message": msg.clone()
+                                    }),
+                                },
+                            );
+                            false
+                        }
+                        ProcessState::Idle => {
+                            eprintln!("Event loop stopped: Process idle");
+                            false
+                        }
                     }
-                    Err(e) => Err(format!("Failed to read from stdout: {}", e)),
+                };
+
+                if !should_continue {
+                    break;
                 }
-            } else {
-                Err("Python process stdout not available".to_string())
+
+                // Read event with timeout (30s for long operations)
+                let event_result =
+                    timeout(Duration::from_secs(30), Self::read_event_async(&internals_clone))
+                        .await;
+
+                match event_result {
+                    Ok(Ok(Some(event))) => {
+                        eprintln!("Received event: {} - {:?}", event.event_type, event.data);
+
+                        // Emit event based on type
+                        let emit_result = match event.event_type.as_str() {
+                            "progress" => app_handle.emit("python_progress", event.clone()),
+                            "result" => app_handle.emit("python_result", event.clone()),
+                            "error" => app_handle.emit("python_error", event.clone()),
+                            _ => {
+                                eprintln!("Unknown event type: {}", event.event_type);
+                                continue;
+                            }
+                        };
+
+                        if let Err(e) = emit_result {
+                            eprintln!("Failed to emit event: {}", e);
+                        }
+
+                        // If error event, update state and stop loop
+                        if event.event_type == "error" {
+                            if let Ok(mut internals) = internals_clone.lock() {
+                                let error_msg = event.data["message"]
+                                    .as_str()
+                                    .unwrap_or("Unknown error")
+                                    .to_string();
+                                internals.state = ProcessState::Error(error_msg);
+                            }
+                            break;
+                        }
+                    }
+                    Ok(Ok(None)) => {
+                        // EOF - process terminated
+                        eprintln!("Python process stdout closed (EOF)");
+                        if let Ok(mut internals) = internals_clone.lock() {
+                            internals.state = ProcessState::Idle;
+                        }
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        // Read error
+                        eprintln!("Error reading event: {}", e);
+                        let error_msg = e.clone();
+                        if let Ok(mut internals) = internals_clone.lock() {
+                            internals.state = ProcessState::Error(e);
+                        }
+                        let _ = app_handle.emit(
+                            "python_error",
+                            PythonEvent {
+                                event_type: "error".to_string(),
+                                data: serde_json::json!({"message": error_msg}),
+                            },
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout - check if process is still alive
+                        eprintln!("Event read timeout, checking process health");
+                        let is_alive = {
+                            if let Ok(mut internals) = internals_clone.lock() {
+                                if let Some(ref mut child) = internals.child {
+                                    match child.try_wait() {
+                                        Ok(None) => true, // Still running
+                                        Ok(Some(status)) => {
+                                            // Process exited
+                                            let msg = format!("Process exited with status: {}", status);
+                                            eprintln!("{}", msg);
+                                            internals.state = ProcessState::Error(msg);
+                                            false
+                                        }
+                                        Err(e) => {
+                                            let msg = format!("Process error: {}", e);
+                                            eprintln!("{}", msg);
+                                            internals.state = ProcessState::Error(msg);
+                                            false
+                                        }
+                                    }
+                                } else {
+                                    eprintln!("No child process found");
+                                    false
+                                }
+                            } else {
+                                eprintln!("Failed to acquire lock for health check");
+                                false
+                            }
+                        };
+
+                        if !is_alive {
+                            let _ = app_handle.emit(
+                                "python_error",
+                                PythonEvent {
+                                    event_type: "error".to_string(),
+                                    data: serde_json::json!({
+                                        "message": "Python process terminated unexpectedly"
+                                    }),
+                                },
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                // Small delay to prevent tight loop
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            eprintln!("Python event loop terminated");
+        });
+
+        // Store the handle
+        {
+            let mut internals = self.internals.lock()
+                .map_err(|e| format!("Failed to lock internals: {}", e))?;
+            internals.event_loop_handle = Some(handle);
+        }
+
+        Ok(())
+    }
+
+    /// Async helper to read a single event from stdout using the persistent BufReader
+    async fn read_event_async(
+        internals: &Arc<Mutex<ProcessInternals>>,
+    ) -> Result<Option<PythonEvent>, String> {
+        // This runs in a blocking context but is called from async
+        tokio::task::spawn_blocking({
+            let internals = Arc::clone(internals);
+            move || {
+                let mut internals = internals
+                    .lock()
+                    .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+                // Use the persistent BufReader
+                if let Some(ref mut reader) = internals.stdout_reader {
+                    let mut line = String::new();
+
+                    match reader.read_line(&mut line) {
+                        Ok(0) => Ok(None), // EOF
+                        Ok(_) => {
+                            if line.trim().is_empty() {
+                                return Ok(None);
+                            }
+
+                            let event: PythonEvent = serde_json::from_str(&line)
+                                .map_err(|e| format!("Failed to parse event JSON '{}': {}", line.trim(), e))?;
+                            Ok(Some(event))
+                        }
+                        Err(e) => Err(format!("Failed to read line: {}", e)),
+                    }
+                } else {
+                    Err("Python process stdout reader not available".to_string())
+                }
+            }
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+    }
+
+    /// Gets the current process state
+    ///
+    /// # Returns
+    /// * Current `ProcessState`
+    pub fn get_state(&self) -> ProcessState {
+        self.internals
+            .lock()
+            .map(|i| i.state.clone())
+            .unwrap_or(ProcessState::Error("Failed to acquire lock".to_string()))
+    }
+
+    /// Checks if the Python process is alive
+    ///
+    /// # Returns
+    /// * `true` if process is running
+    /// * `false` if process is not started or has exited
+    pub fn is_alive(&self) -> bool {
+        if let Ok(mut internals) = self.internals.lock() {
+            if let Some(ref mut child) = internals.child {
+                match child.try_wait() {
+                    Ok(None) => return true, // Still running
+                    Ok(Some(_)) => {
+                        internals.state = ProcessState::Idle;
+                        return false;
+                    }
+                    Err(_) => return false,
+                }
+            }
+        }
+        false
+    }
+
+    /// Checks if the Python process is running
+    /// Alias for is_alive() for compatibility
+    ///
+    /// # Returns
+    /// * `true` if process is running
+    /// * `false` if process is not started or has exited
+    pub fn is_running(&self) -> bool {
+        self.is_alive()
+    }
+
+    /// Reads a single event from Python's stdout (synchronous)
+    ///
+    /// NOTE: This method should not be used when the event loop is active,
+    /// as both would be reading from the same stdout stream.
+    ///
+    /// # Returns
+    /// * `Ok(Some(event))` if event was read successfully
+    /// * `Ok(None)` if no event available or EOF
+    /// * `Err(String)` if read failed
+    pub fn read_event(&self) -> Result<Option<PythonEvent>, String> {
+        let mut internals = self
+            .internals
+            .lock()
+            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+        // Use the persistent BufReader
+        if let Some(ref mut reader) = internals.stdout_reader {
+            let mut line = String::new();
+
+            match reader.read_line(&mut line) {
+                Ok(0) => Ok(None), // EOF
+                Ok(_) => {
+                    if line.trim().is_empty() {
+                        return Ok(None);
+                    }
+
+                    let event: PythonEvent = serde_json::from_str(&line)
+                        .map_err(|e| format!("Failed to parse event: {}", e))?;
+                    Ok(Some(event))
+                }
+                Err(e) => Err(format!("Failed to read from stdout: {}", e)),
             }
         } else {
-            Err("Python process not started".to_string())
+            Err("Python process stdout reader not available".to_string())
         }
     }
 
+    /// Marks the process as cancelled
+    ///
+    /// This updates the state to `Cancelled` which will cause the event loop
+    /// to terminate gracefully.
+    pub fn set_cancelled(&self) -> Result<(), String> {
+        let mut internals = self
+            .internals
+            .lock()
+            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+        internals.state = ProcessState::Cancelled;
+        Ok(())
+    }
+
     /// Stops the Python process
-    pub fn stop(&mut self) -> Result<(), String> {
-        if let Some(mut child) = self.child.take() {
-            child.kill()
-                .map_err(|e| format!("Failed to kill Python process: {}", e))?;
-            child.wait()
-                .map_err(|e| format!("Failed to wait for Python process: {}", e))?;
+    ///
+    /// This gracefully shuts down the event loop, kills the process, and waits for it to terminate.
+    ///
+    /// # Returns
+    /// * `Ok(())` if process stopped successfully
+    /// * `Err(String)` if stop failed
+    pub fn stop(&self) -> Result<(), String> {
+        eprintln!("Stopping Python process");
+
+        // First, abort the event loop if it's running
+        {
+            let mut internals = self
+                .internals
+                .lock()
+                .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+
+            if let Some(handle) = internals.event_loop_handle.take() {
+                eprintln!("Aborting event loop task");
+                handle.abort();
+            }
+
+            // Kill the child process
+            if let Some(mut child) = internals.child.take() {
+                eprintln!("Killing Python child process");
+                child
+                    .kill()
+                    .map_err(|e| format!("Failed to kill Python process: {}", e))?;
+                child
+                    .wait()
+                    .map_err(|e| format!("Failed to wait for Python process: {}", e))?;
+            }
+
+            // Clean up reader
+            internals.stdout_reader = None;
+            internals.state = ProcessState::Idle;
         }
+
+        eprintln!("Python process stopped successfully");
         Ok(())
     }
 }
@@ -102,5 +530,53 @@ impl PythonProcess {
 impl Drop for PythonProcess {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+impl Default for PythonProcess {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Gets the path to the Python executable in the virtual environment
+fn get_venv_python_path() -> Result<String, String> {
+    #[cfg(debug_assertions)]
+    {
+        let current_dir = std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?;
+
+        let project_root = current_dir.parent()
+            .ok_or_else(|| "Failed to get parent directory".to_string())?;
+
+        // Platform-specific venv path
+        #[cfg(target_os = "windows")]
+        let venv_python = project_root
+            .join("python-backend")
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe");
+
+        #[cfg(not(target_os = "windows"))]
+        let venv_python = project_root
+            .join("python-backend")
+            .join(".venv")
+            .join("bin")
+            .join("python");
+
+        if !venv_python.exists() {
+            return Err(format!(
+                "Virtual environment Python not found at: {}. Run setup.bat/setup.sh first.",
+                venv_python.display()
+            ));
+        }
+
+        Ok(venv_python.to_string_lossy().to_string())
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        // Production: Python should be bundled with the app
+        Err("Production Python bundling not yet implemented".to_string())
     }
 }
