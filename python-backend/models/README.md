@@ -37,19 +37,132 @@ models/
 
 ### Downloading Models
 
-**Method 1: Let PaddleOCR download (recommended)**
-1. Run the application once
-2. Models will be downloaded automatically
-3. Copy from cache directory to `python-backend/models/`
+**Method 1: Use the automated download script (easiest)**
 
-**Method 2: Manual download**
+Run the provided download script:
+```bash
+# From project root
+cd python-backend
+python download_models.py
+```
 
-Download English models from PaddleOCR GitHub:
-- Detection: [en_PP-OCRv4_det](https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/doc/doc_en/models_list_en.md#1-text-detection-model)
-- Recognition: [en_PP-OCRv4_rec](https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/doc/doc_en/models_list_en.md#2-text-recognition-model)
-- Angle Classifier: [ch_ppocr_mobile_v2.0_cls](https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/doc/doc_en/models_list_en.md#3-text-angle-classification-model)
+This will automatically download and extract all three models to the correct directories.
 
-Extract each model into its respective directory (det/, rec/, cls/).
+**Method 2: Let PaddleOCR download (simple but requires internet on first run)**
+1. Run the application once without bundled models
+2. PaddleOCR will download models automatically to cache
+3. Optionally copy from cache directory to `python-backend/models/` for future use
+
+**Method 3: Manual download (for offline environments)**
+
+Download these three English models:
+
+**1. Detection Model** (English PP-OCRv3, ~3.9 MB):
+```bash
+# Download
+curl -L https://paddleocr.bj.bcebos.com/PP-OCRv3/english/en_PP-OCRv3_det_infer.tar -o det_model.tar
+
+# Extract to det/ directory
+tar -xf det_model.tar
+mv en_PP-OCRv3_det_infer/* det/
+rm -rf en_PP-OCRv3_det_infer det_model.tar
+```
+
+**Windows PowerShell:**
+```powershell
+# Download
+Invoke-WebRequest -Uri "https://paddleocr.bj.bcebos.com/PP-OCRv3/english/en_PP-OCRv3_det_infer.tar" -OutFile "det_model.tar"
+
+# Extract (requires tar.exe available in Windows 10+)
+tar -xf det_model.tar
+Move-Item -Path "en_PP-OCRv3_det_infer\*" -Destination "det\" -Force
+Remove-Item -Recurse -Force en_PP-OCRv3_det_infer, det_model.tar
+```
+
+**2. Recognition Model** (English PP-OCRv4, ~8.6 MB):
+```bash
+# Download
+curl -L https://paddleocr.bj.bcebos.com/PP-OCRv4/english/en_PP-OCRv4_rec_infer.tar -o rec_model.tar
+
+# Extract to rec/ directory
+tar -xf rec_model.tar
+mv en_PP-OCRv4_rec_infer/* rec/
+rm -rf en_PP-OCRv4_rec_infer rec_model.tar
+```
+
+**Windows PowerShell:**
+```powershell
+# Download
+Invoke-WebRequest -Uri "https://paddleocr.bj.bcebos.com/PP-OCRv4/english/en_PP-OCRv4_rec_infer.tar" -OutFile "rec_model.tar"
+
+# Extract
+tar -xf rec_model.tar
+Move-Item -Path "en_PP-OCRv4_rec_infer\*" -Destination "rec\" -Force
+Remove-Item -Recurse -Force en_PP-OCRv4_rec_infer, rec_model.tar
+```
+
+**3. Angle Classification Model** (Multilingual, ~2.2 MB):
+```bash
+# Download
+curl -L https://paddleocr.bj.bcebos.com/dygraph_v2.0/ch/ch_ppocr_mobile_v2.0_cls_infer.tar -o cls_model.tar
+
+# Extract to cls/ directory
+tar -xf cls_model.tar
+mv ch_ppocr_mobile_v2.0_cls_infer/* cls/
+rm -rf ch_ppocr_mobile_v2.0_cls_infer cls_model.tar
+```
+
+**Windows PowerShell:**
+```powershell
+# Download
+Invoke-WebRequest -Uri "https://paddleocr.bj.bcebos.com/dygraph_v2.0/ch/ch_ppocr_mobile_v2.0_cls_infer.tar" -OutFile "cls_model.tar"
+
+# Extract
+tar -xf cls_model.tar
+Move-Item -Path "ch_ppocr_mobile_v2.0_cls_infer\*" -Destination "cls\" -Force
+Remove-Item -Recurse -Force ch_ppocr_mobile_v2.0_cls_infer, cls_model.tar
+```
+
+**Direct Download URLs** (for browser download):
+- Detection: `https://paddleocr.bj.bcebos.com/PP-OCRv3/english/en_PP-OCRv3_det_infer.tar`
+- Recognition: `https://paddleocr.bj.bcebos.com/PP-OCRv4/english/en_PP-OCRv4_rec_infer.tar`
+- Classification: `https://paddleocr.bj.bcebos.com/dygraph_v2.0/ch/ch_ppocr_mobile_v2.0_cls_infer.tar`
+
+### Verifying Installation
+
+After downloading, verify the directory structure:
+```
+python-backend/models/
+├── det/
+│   ├── inference.pdiparams
+│   ├── inference.pdiparams.info
+│   ├── inference.pdmodel
+│   └── inference.yml
+├── rec/
+│   ├── inference.pdiparams
+│   ├── inference.pdiparams.info
+│   ├── inference.pdmodel
+│   └── inference.yml
+└── cls/
+    ├── inference.pdiparams
+    ├── inference.pdiparams.info
+    ├── inference.pdmodel
+    └── inference.yml
+```
+
+You can verify with:
+```bash
+# Unix/macOS/Linux
+ls -R python-backend/models/
+
+# Windows
+tree /F python-backend\models
+```
+
+Each model directory should contain at least:
+- `inference.pdmodel` - Model structure
+- `inference.pdiparams` - Model weights
+- `inference.yml` or `inference.json` - Configuration (PaddleOCR 3.0+)
 
 ### Model Sizes
 

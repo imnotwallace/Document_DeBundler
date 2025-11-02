@@ -155,6 +155,10 @@ class SplitDetector:
         """
         Detect blank separator pages.
 
+        A page is considered blank if it has very little text (< 10 chars after stripping whitespace).
+        This includes completely empty pages and whitespace-only pages.
+        The split is placed AFTER the blank page (at the start of the next document).
+
         Returns:
             List of (page_num, confidence, reason)
         """
@@ -162,13 +166,13 @@ class SplitDetector:
 
         for i, page in enumerate(pages):
             text = page['text'] or ''
-            text_length = len(text.strip())
+            text_length = len(text.strip())  # Strip whitespace to detect whitespace-only pages
 
-            if text_length < 50:  # Very little text
-                # Check if next page has content
+            if text_length < 10:  # Very little text (truly blank or whitespace-only pages)
+                # Check if next page has content (indicating a new document starts)
                 if i + 1 < len(pages):
                     next_text = pages[i + 1]['text'] or ''
-                    if len(next_text.strip()) > 100:
+                    if len(next_text.strip()) > 30:  # Next page has substantial content
                         splits.append((
                             i + 1,  # Split AFTER blank page
                             0.85,
@@ -218,21 +222,25 @@ class SplitDetector:
         self,
         embeddings: np.ndarray,
         eps: float = 0.5,
-        min_samples: int = 3
+        min_samples: int = 1
     ) -> List[Tuple[int, float, str]]:
         """
         Use DBSCAN clustering to detect document boundaries.
 
         Args:
             embeddings: Page embeddings
-            eps: DBSCAN epsilon parameter
-            min_samples: Minimum cluster size
+            eps: DBSCAN epsilon parameter (controls cluster distance threshold)
+                - Lower eps (0.3-0.4): More sensitive, more clusters/splits
+                - Higher eps (0.5-0.7): Less sensitive, fewer clusters/splits
+            min_samples: Minimum samples for DBSCAN core points (default: 1)
+                - Set to 1 to allow single-page and small document detection
+                - DBSCAN can still group similar pages even with min_samples=1
 
         Returns:
             List of (page_num, confidence, reason)
         """
-        if len(embeddings) < min_samples:
-            return []
+        if len(embeddings) < 1:
+            return []  # Need at least 1 page to cluster
 
         # Run DBSCAN
         clustering = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine')
@@ -303,6 +311,7 @@ class SplitDetector:
 
 def detect_splits_for_document(
     doc_id: str,
+    use_llm_refinement: bool = False,
     progress_callback=None
 ) -> int:
     """
@@ -370,6 +379,68 @@ def detect_splits_for_document(
     # Combine signals
     candidates = detector.combine_signals(all_splits)
 
+    # Optional LLM refinement
+    if use_llm_refinement:
+        if progress_callback:
+            progress_callback(4, 6, "Running LLM refinement...")
+
+        try:
+            from .llm.split_analyzer import SplitAnalyzer
+            from .llm.settings import get_settings
+
+            settings = get_settings()
+
+            # Only run if LLM is enabled
+            if settings.enabled and settings.split_refinement_enabled:
+                # Get page texts for LLM analysis
+                page_texts = [page['text'] or '' for page in pages]
+
+                # Prepare candidates for LLM
+                llm_candidates = [
+                    {
+                        'split_page': c['page'],
+                        'heuristic_signals': c['signals']
+                    }
+                    for c in candidates
+                ]
+
+                # Run LLM analysis
+                analyzer = SplitAnalyzer(cache_manager=cache)
+                refined = analyzer.analyze_splits_batch(
+                    llm_candidates,
+                    page_texts,
+                    progress_callback=lambda curr, total, msg: (
+                        progress_callback(4, 6, f"LLM: {msg}") if progress_callback else None
+                    )
+                )
+
+                # Filter by LLM decision and confidence threshold
+                min_confidence = settings.split_confidence_threshold
+                candidates = [
+                    {
+                        'page': r['split_page'],
+                        'confidence': r['llm_confidence'],
+                        'signals': r['heuristic_signals'] + [f"LLM: {r['llm_reasoning']}"],
+                        'signal_count': len(r['heuristic_signals']) + 1,
+                        'llm_approved': r['llm_decision'],
+                        'llm_reasoning': r['llm_reasoning']
+                    }
+                    for r in refined
+                    if r['llm_decision'] and r['llm_confidence'] >= min_confidence
+                ]
+
+                logger.info(f"LLM refined {len(refined)} candidates to {len(candidates)} approved splits")
+            else:
+                logger.info("LLM refinement disabled in settings")
+
+        except Exception as e:
+            logger.warning(f"LLM refinement failed, using heuristic results: {e}")
+            # Continue with original candidates if LLM fails
+
+    if progress_callback:
+        total_steps = 6 if use_llm_refinement else 5
+        progress_callback(total_steps - 1, total_steps, "Saving results...")
+
     # Save to database
     for candidate in candidates:
         method = 'heuristic' if candidate['confidence'] >= 0.8 else 'clustering'
@@ -386,7 +457,8 @@ def detect_splits_for_document(
         )
 
     if progress_callback:
-        progress_callback(5, 5, f"Detected {len(candidates)} potential splits")
+        total_steps = 6 if use_llm_refinement else 5
+        progress_callback(total_steps, total_steps, f"Detected {len(candidates)} splits")
 
     logger.info(f"Detected {len(candidates)} splits for document {doc_id[:8]}...")
     return len(candidates)

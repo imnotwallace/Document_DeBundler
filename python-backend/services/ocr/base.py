@@ -32,7 +32,7 @@ class OCRConfig:
     gpu_id: int = 0
 
     # Language settings
-    languages: List[str] = field(default_factory=lambda: ["en"])
+    languages: List[str] = field(default_factory=lambda: ["en"])  # Language code (en for English)
 
     # Processing settings
     batch_size: int = 10  # Pages to process at once

@@ -5,20 +5,28 @@ A desktop application for processing, splitting, and organizing PDF documents wi
 ## Features
 
 - **PDF Processing**: Handle PDFs up to 5GB in size
-- **OCR Support**: Optical character recognition for scanned documents
-- **Intelligent Splitting**: Automatically recommend document splits
-- **Smart Naming**: AI-powered naming suggestions for split documents
+- **OCR Support**: Optical character recognition for scanned documents with GPU acceleration
+- **Document De-Bundling**: ML-powered intelligent document separation using semantic analysis
+- **Intelligent Splitting**: Automatically recommend document splits using AI and content analysis
+- **Smart Naming**: AI-powered naming suggestions for split documents via LLM integration
+- **Semantic Analysis**: Content-based document grouping using Nomic Embed v1.5 embeddings
 - **Batch Processing**: Process large documents efficiently with progress tracking
+- **VRAM Monitoring**: Real-time memory management prevents out-of-memory errors
 - **Local Processing**: All operations run locally - no cloud dependencies
-- **Cross-Platform**: Built with Tauri for Windows, macOS, and Linux
+- **Cross-Platform**: Built with Tauri 2.0 for Windows, macOS, and Linux
 
 ## Tech Stack
 
 - **Frontend**: Svelte + Vite + TypeScript + TailwindCSS
-- **Desktop Framework**: Tauri (Rust)
-- **Backend**: Python
-- **PDF Processing**: PyMuPDF
-- **OCR**: PaddleOCR (primary) / Tesseract (fallback)
+- **Desktop Framework**: Tauri 2.0 (Rust)
+- **Backend**: Python 3.8+
+- **Dependency Management**: uv (10-100x faster than pip)
+- **PDF Processing**: PyMuPDF (fitz)
+- **OCR**: PaddleOCR 2.7.3+ with PaddlePaddle 3.0+ (primary) / Tesseract (fallback)
+- **ML/AI**: 
+  - sentence-transformers (Nomic Embed v1.5 for semantic analysis)
+  - scikit-learn (DBSCAN clustering for document grouping)
+  - LLM integration for intelligent naming and splitting suggestions
 
 ## Prerequisites
 
@@ -27,6 +35,9 @@ A desktop application for processing, splitting, and organizing PDF documents wi
 - **Node.js** 18.x or higher ([Download](https://nodejs.org/))
 - **Rust** 1.70 or higher ([Install](https://www.rust-lang.org/tools/install))
 - **Python** 3.8 or higher ([Download](https://www.python.org/downloads/))
+- **uv** (Recommended): Fast Python package manager ([Install](https://github.com/astral-sh/uv)): `pip install uv`
+  - 10-100x faster than pip for dependency installation
+  - Optional but highly recommended for quick setup
 
 ### For Optimal Performance
 
@@ -38,6 +49,8 @@ A desktop application for processing, splitting, and organizing PDF documents wi
 ## Installation
 
 ### Quick Setup (Recommended)
+
+The setup scripts use **uv** for fast dependency installation (10-100x faster than pip). If you don't have uv installed, run `pip install uv` first.
 
 #### Windows
 ```bash
@@ -53,6 +66,20 @@ chmod +x setup.sh
 ### Manual Setup
 
 1. **Set up Python virtual environment**
+
+**Option A: Using uv (Recommended - Fast)**
+```bash
+cd python-backend
+uv venv
+venv\Scripts\activate  # Windows
+source venv/bin/activate  # macOS/Linux
+
+# Install dependencies with uv (10-100x faster)
+uv pip sync requirements.txt
+cd ..
+```
+
+**Option B: Using standard pip**
 ```bash
 cd python-backend
 python -m venv venv
@@ -99,7 +126,14 @@ Output will be in `src-tauri/target/release/bundle/`
 #### Python Tests
 ```bash
 cd python-backend
-# Activate venv first
+
+# Option A: With uv (no activation needed, faster)
+uv run pytest
+uv run pytest --cov  # with coverage
+
+# Option B: With activated venv
+venv\Scripts\activate  # Windows
+source venv/bin/activate  # macOS/Linux
 pytest
 ```
 
@@ -128,10 +162,32 @@ Document-De-Bundler/
 │   ├── main.py             # IPC entry point (stdin/stdout)
 │   ├── services/
 │   │   ├── pdf_processor.py   # PDF analysis & splitting
-│   │   ├── ocr_service.py     # OCR processing
-│   │   ├── naming_service.py  # Document naming
-│   │   └── bundler.py         # ZIP/folder creation
+│   │   ├── ocr_service.py     # OCR processing wrapper
+│   │   ├── ocr/               # OCR abstraction layer
+│   │   │   ├── base.py           # OCR engine interface
+│   │   │   ├── config.py         # Hardware detection
+│   │   │   ├── manager.py        # Engine lifecycle
+│   │   │   ├── vram_monitor.py   # Real-time memory tracking
+│   │   │   ├── text_quality.py   # OCR quality analysis
+│   │   │   └── engines/          # PaddleOCR & Tesseract
+│   │   ├── llm/               # LLM integration module
+│   │   │   ├── config.py         # LLM configuration
+│   │   │   └── prompts.py        # Prompt templates
+│   │   ├── split_detection.py  # ML-based document splitting
+│   │   ├── embedding_service.py # Semantic analysis (Nomic Embed)
+│   │   ├── naming_service.py   # Document naming
+│   │   ├── bundler.py          # ZIP/folder creation
+│   │   ├── cache_manager.py    # Performance caching
+│   │   └── resource_path.py    # Bundled resource management
+│   ├── models/             # OCR model storage (optional)
+│   ├── bin/                # Bundled binaries (Tesseract)
 │   └── requirements.txt
+│
+├── docs/                   # Implementation documentation
+│   ├── DEBUNDLING_QUICK_START.md
+│   ├── EMBEDDING_SERVICE_IMPLEMENTATION.md
+│   ├── IMPLEMENTATION_SPEC_DEBUNDLING.md
+│   └── SPLIT_DETECTION_IMPLEMENTATION_REPORT.md
 │
 └── package.json            # Node.js dependencies
 ```
@@ -145,11 +201,39 @@ Document-De-Bundler/
 5. **Progress Updates**: Real-time updates via event streaming
 6. **Output**: Split PDFs saved to user-selected location
 
+## Document De-Bundling
+
+The application includes advanced **ML-powered document separation** capabilities for intelligently splitting bundled PDFs:
+
+### How It Works
+
+1. **Content Analysis**: Extracts text from each page using OCR or existing text layers
+2. **Semantic Embeddings**: Generates vector embeddings using Nomic Embed v1.5 (sentence-transformers)
+3. **Similarity Analysis**: Computes cosine similarity between consecutive pages to detect topic boundaries
+4. **Clustering**: Uses DBSCAN algorithm to group related pages into coherent documents
+5. **Smart Splitting**: Automatically suggests split points based on content discontinuities
+6. **LLM Integration**: Provides intelligent naming suggestions for separated documents
+
+### Key Features
+
+- **Content-Based Separation**: Understands document semantics, not just visual breaks
+- **Configurable Sensitivity**: Adjust similarity thresholds for different document types
+- **Hybrid Approach**: Combines visual markers with semantic analysis for best results
+- **Local Processing**: All ML operations run locally with no cloud dependencies
+
+### Performance
+
+- **CPU Mode**: ~1-3 seconds per page for embedding generation
+- **GPU Mode**: ~0.3-0.8 seconds per page (CUDA/DirectML)
+- **Smart Caching**: Previously analyzed documents use cached embeddings
+
+For detailed implementation, see `docs/DEBUNDLING_QUICK_START.md`
+
 ## Self-Contained Design
 
 This project is designed to be completely self-contained:
 
-- **Python dependencies**: Installed in local `python-backend/venv/`
+- **Python dependencies**: Installed in local `python-backend/venv/` (managed by uv or pip)
 - **Node.js dependencies**: Installed in local `node_modules/`
 - **Rust dependencies**: Managed by Cargo in `src-tauri/target/`
 - **No global installations required** (except prerequisites)
@@ -172,8 +256,17 @@ npm run check            # Svelte type checking
 # Python (from python-backend/, with venv activated)
 pytest                   # Run tests
 pytest --cov            # Run tests with coverage
+
+# Python with uv (faster, no activation needed)
+cd python-backend
+uv run pytest           # Run tests with uv
+uv run pytest --cov     # Run tests with coverage
+uv pip install <package> # Add new package
+uv pip sync requirements.txt # Sync dependencies
+
+# Code quality (with venv activated)
 black .                 # Format code
-flake8 .                # Lint code
+flake8 .                # Lint code                # Lint code
 ```
 
 ## System Requirements
@@ -238,6 +331,8 @@ Real-time VRAM monitoring prevents out-of-memory errors and automatically adjust
 ### Python venv not activating
 - Make sure Python is in your PATH
 - Try using `python3` instead of `python`
+- If using uv: Ensure uv is installed (`pip install uv`)
+- Alternative: Use `uv run` commands without activating venv
 
 ### Rust/Cargo errors
 - Run `rustup update` to update Rust
@@ -257,7 +352,8 @@ Real-time VRAM monitoring prevents out-of-memory errors and automatically adjust
 - NVIDIA: Install CUDA toolkit (10.2 or higher)
 - AMD/Intel (Windows): DirectML included with Windows 10/11
 - Verify in Python: `python -c "import paddle; print(paddle.device.is_compiled_with_cuda())"`
-- May need `paddlepaddle-gpu` for NVIDIA: `pip install paddlepaddle-gpu`
+- May need `paddlepaddle-gpu` for NVIDIA: `pip install paddlepaddle-gpu` or `uv pip install paddlepaddle-gpu`
+- **Note**: Project uses PaddlePaddle 3.0+ (breaking changes from 2.x)
 
 **Poor OCR Accuracy:**
 - PaddleOCR provides 95-98% accuracy on most documents

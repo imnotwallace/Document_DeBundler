@@ -19,11 +19,7 @@
       "icons/icon.ico"
     ],
     "targets": "all",
-    "resources": [
-      "../python-backend/bin/**/*",
-      "../python-backend/**/*.py",
-      "../python-backend/requirements.txt"
-    ],
+    "resources": [],
     "externalBin": []
   },
   "app": {

@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" fill="#2563eb" rx="180"/>
-  <path d="M 256 256 L 768 256 L 768 384 L 256 384 Z M 256 448 L 768 448 L 768 576 L 256 576 Z M 256 640 L 768 640 L 768 768 L 256 768 Z" fill="#ffffff" opacity="0.9"/>
-  <text x="512" y="900" font-family="Arial, sans-serif" font-size="120" font-weight="bold" text-anchor="middle" fill="#ffffff">DDB</text>
-</svg>

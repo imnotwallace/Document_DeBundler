@@ -127,7 +127,7 @@ def test_embedding_service():
     try:
         service.cleanup()
 
-        if service.model is None and not service._initialized:
+        if service.text_model is None and service.vision_model is None and not service._initialized:
             print("✓ Service cleaned up successfully")
         else:
             print("✗ Cleanup incomplete")

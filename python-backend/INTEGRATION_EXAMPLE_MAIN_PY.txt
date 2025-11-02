@@ -1,0 +1,112 @@
+# Integration Example for main.py
+# Add this to the IPCHandler class in main.py
+
+    def handle_ocr_batch(self, command: Dict[str, Any]):
+        """
+        Handle batch OCR processing command.
+        
+        Expected command format:
+        {
+            "command": "ocr_batch",
+            "files": ["/path/to/file1.pdf", "/path/to/file2.pdf"],
+            "output_dir": "/path/to/output",
+            "options": {
+                "use_gpu": true  # optional, defaults to true
+            }
+        }
+        """
+        files = command.get("files", [])
+        output_dir = command.get("output_dir")
+        options = command.get("options", {})
+        use_gpu = options.get("use_gpu", True)
+        
+        if not files:
+            self.send_error("No files specified for batch OCR")
+            return
+            
+        if not output_dir:
+            self.send_error("No output directory specified")
+            return
+            
+        logger.info(f"Starting batch OCR: {len(files)} files")
+        
+        try:
+            from services.ocr_batch_service import OCRBatchService
+            
+            # Create progress callback that sends IPC progress events
+            def progress_callback(current, total, message, percent, eta):
+                self.send_progress(
+                    current=current,
+                    total=total,
+                    message=message,
+                    percent=percent
+                )
+            
+            # Initialize service
+            service = OCRBatchService(
+                progress_callback=progress_callback,
+                cancellation_flag=None,  # TODO: Wire up to self.cancelled flag
+                use_gpu=use_gpu
+            )
+            
+            # Process batch
+            results = service.process_batch(files, output_dir)
+            
+            # Send results
+            self.send_result({
+                "status": "complete",
+                "successful_files": len(results['successful']),
+                "failed_files": len(results['failed']),
+                "total_pages": results['total_pages_processed'],
+                "statistics": results['statistics'],
+                "successful": results['successful'],
+                "failed": results['failed']
+            })
+            
+            logger.info(
+                f"Batch OCR complete: {len(results['successful'])} successful, "
+                f"{len(results['failed'])} failed"
+            )
+            
+        except Exception as e:
+            logger.error(f"Batch OCR failed: {e}", exc_info=True)
+            self.send_error(f"Batch OCR processing failed: {str(e)}")
+            
+        finally:
+            if 'service' in locals():
+                service.cleanup()
+
+
+# Also update the handle_command method to route the new command:
+
+    def handle_command(self, command: Dict[str, Any]):
+        """Process incoming command"""
+        cmd_type = command.get("command")
+
+        if cmd_type == "analyze":
+            self.handle_analyze(command)
+        elif cmd_type == "process":
+            self.handle_process(command)
+        elif cmd_type == "ocr_batch":
+            self.handle_ocr_batch(command)  # ADD THIS LINE
+        elif cmd_type == "cancel":
+            self.handle_cancel()
+        else:
+            self.send_error(f"Unknown command: {cmd_type}")
+
+
+# Example usage from Rust/Tauri:
+# 
+# let command = json!({
+#     "command": "ocr_batch",
+#     "files": [
+#         "C:\Documents\file1.pdf",
+#         "C:\Documents\file2.pdf"
+#     ],
+#     "output_dir": "C:\Output",
+#     "options": {
+#         "use_gpu": true
+#     }
+# });
+# 
+# python_stdin.write(serde_json::to_string(&command)?)?;

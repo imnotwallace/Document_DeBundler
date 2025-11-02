@@ -42,3 +42,8 @@ echo
 echo "To start development:"
 echo "  1. Run: npm run tauri:dev"
 echo
+echo "OPTIONAL: Pre-install embedding models (for offline use)"
+echo "  - Models will auto-download on first use (~1.15GB)"
+echo "  - To pre-install: cd python-backend && python download_embedding_models.py"
+echo "  - This downloads Nomic Embed v1.5 models locally"
+echo

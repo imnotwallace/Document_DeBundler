@@ -79,6 +79,36 @@ class TesseractEngine(OCREngine):
                 "Install with: pip install pytesseract"
             )
 
+    def _is_valid_text(self, text: str) -> bool:
+        """
+        Validate that text contains mostly valid characters and isn't garbage.
+
+        Args:
+            text: Text string to validate
+
+        Returns:
+            True if text appears valid, False if likely garbage
+        """
+        if not text or len(text) == 0:
+            return False
+
+        # Check alphanumeric ratio (at least 50% should be letters/numbers)
+        alnum_count = sum(c.isalnum() for c in text)
+        if alnum_count / len(text) < 0.5:
+            return False
+
+        # Reject common OCR garbage patterns
+        garbage_patterns = ['|', '||', '|||', '#', '##', '###', '...', '---', ']', '[', '}{', '()']
+        if text.strip() in garbage_patterns:
+            return False
+
+        # Reject text that's only punctuation
+        punct_count = sum(c in '.,!?;:' for c in text)
+        if punct_count == len(text):
+            return False
+
+        return True
+
     def process_image(self, image: np.ndarray) -> OCRResult:
         """
         Process a single image with Tesseract.
@@ -128,10 +158,13 @@ class TesseractEngine(OCREngine):
             text_parts = []
             confidences = []
 
+            # Minimum confidence threshold (60%) to filter low-quality detections
+            MIN_CONFIDENCE = 60
+
             for i, conf in enumerate(data['conf']):
-                if int(conf) > 0:  # Valid confidence
+                if int(conf) > MIN_CONFIDENCE:  # Require 60% confidence minimum
                     text = data['text'][i].strip()
-                    if text:
+                    if text and self._is_valid_text(text):  # Validate text quality
                         text_parts.append(text)
                         confidences.append(int(conf) / 100.0)  # Convert to 0-1 range
 

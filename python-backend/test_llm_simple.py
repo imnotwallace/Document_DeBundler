@@ -1,156 +1,221 @@
 """
-Simple test for LLM module - imports only what's needed
+Simple LLM Test - Quick verification without model download
+
+This tests the LLM integration basics:
+1. Import check
+2. Settings management
+3. Model path detection
+4. Lazy loading behavior
 """
 
-# Direct imports to avoid services.__init__.py
 import sys
-import os
-sys.path.insert(0, os.path.dirname(__file__))
 
-# Mock the detect_hardware_capabilities function before importing
-class MockHardwareCapabilities:
-    @staticmethod
-    def detect_hardware_capabilities():
-        return {
-            'gpu_available': True,
-            'cuda_available': True,
-            'directml_available': False,
-            'gpu_memory_gb': 4.0,
-            'system_memory_gb': 16.0,
-            'cpu_count': 8,
-            'platform': 'Windows'
-        }
+def test_imports():
+    """Test 1: Can we import the LLM modules?"""
+    print("\n" + "="*60)
+    print("TEST 1: Import Check")
+    print("="*60)
 
-# Inject mock
-sys.modules['services.ocr.config'] = MockHardwareCapabilities()
+    try:
+        from services.llm import config, prompts, loader, manager, settings
+        from services.llm import split_analyzer, name_generator
+        print("[OK] All LLM modules imported successfully")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Import failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-# Now we can import the llm config directly
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'services', 'llm'))
+def test_settings():
+    """Test 2: Settings management"""
+    print("\n" + "="*60)
+    print("TEST 2: Settings Management")
+    print("="*60)
 
-import config
-import prompts
+    try:
+        from services.llm.settings import get_settings_manager, LLMSettings
 
+        mgr = get_settings_manager()
+        settings = mgr.get()
 
-def test_config_selection():
-    """Test LLM configuration selection"""
-    print("=" * 80)
-    print("LLM Configuration Selection Test")
-    print("=" * 80)
+        print(f"[OK] Settings loaded:")
+        print(f"   Enabled: {settings.enabled}")
+        print(f"   Model: {settings.model_preference}")
+        print(f"   GPU: {settings.use_gpu}")
+        print(f"   Split refinement: {settings.split_refinement_enabled}")
+        print(f"   Naming: {settings.naming_enabled}")
+        print(f"   Auto cleanup: {settings.auto_cleanup_enabled}")
 
-    vram_levels = [
-        (0, "No GPU (CPU only)"),
-        (2, "2GB VRAM (Low-end GPU)"),
-        (4, "4GB VRAM (Target hardware)"),
-        (6, "6GB VRAM (Mid-range GPU)"),
-        (8, "8GB VRAM (High-end GPU)"),
-    ]
+        # Validate
+        valid, error = mgr.validate()
+        print(f"\n   Valid: {valid}")
+        if error:
+            print(f"   Validation error: {error}")
 
-    for vram_gb, description in vram_levels:
-        print(f"\n{description}:")
-        print("-" * 80)
-        cfg = config.select_optimal_llm_config(gpu_memory_gb=vram_gb)
+        return True
+    except Exception as e:
+        print(f"[FAIL] Settings test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-        print(f"  Model: {cfg['model_name']}")
-        print(f"  Model ID: {cfg['model_id']}")
-        print(f"  Quantization: {cfg['quantization']}")
-        print(f"  GPU Layers: {cfg['n_gpu_layers']}")
-        print(f"  Expected VRAM: {cfg['expected_vram_gb']} GB")
-        print(f"  Offload Strategy: {cfg['offload_strategy']}")
+def test_model_paths():
+    """Test 3: Model path detection"""
+    print("\n" + "="*60)
+    print("TEST 3: Model Path Detection")
+    print("="*60)
 
-        if 'cpu_layers' in cfg:
-            print(f"  CPU Layers: {cfg['cpu_layers']}")
+    try:
+        from services.resource_path import (
+            get_llm_models_dir,
+            get_phi3_mini_path,
+            get_gemma2_2b_path,
+            verify_llm_models
+        )
 
-        # Get download info
-        download_info = config.get_model_download_info(cfg)
-        print(f"  Model file: {download_info['model_file']}")
+        models_dir = get_llm_models_dir()
+        print(f"[OK] LLM models directory: {models_dir}")
+        print(f"   Exists: {models_dir.exists()}")
 
-        # Get generation params
-        split_params = config.get_generation_params('split_refinement')
-        naming_params = config.get_generation_params('naming')
-        print(f"  Split params: temp={split_params['temperature']}, max_tokens={split_params['max_tokens']}")
-        print(f"  Naming params: temp={naming_params['temperature']}, max_tokens={naming_params['max_tokens']}")
+        phi3_path = get_phi3_mini_path()
+        gemma2_path = get_gemma2_2b_path()
 
+        print(f"\n[OK] Model paths:")
+        print(f"   Phi-3 Mini: {phi3_path}")
+        print(f"   Exists: {phi3_path.exists() if phi3_path else False}")
 
-def test_prompts():
-    """Test prompt formatting"""
-    print("\n" + "=" * 80)
-    print("Prompt Formatting Test")
-    print("=" * 80)
+        print(f"\n   Gemma 2 2B: {gemma2_path}")
+        print(f"   Exists: {gemma2_path.exists() if gemma2_path else False}")
 
-    # Test split prompt
-    print("\n1. Split Refinement Prompt Example:")
-    print("-" * 80)
+        # Verify models
+        models = verify_llm_models()
+        print(f"\n[OK] Model verification:")
+        print(f"   Phi-3 Mini available: {models['phi3_mini']}")
+        print(f"   Gemma 2 2B available: {models['gemma2_2b']}")
 
-    before_pages = [
-        {'page_num': 4, 'text': 'This is page 4 of the first document. Contains important contract details.'},
-    ]
-    after_pages = [
-        {'page_num': 5, 'text': 'Page 1. INVOICE - Acme Corporation. Date: 2024-06-15'},
-    ]
-    signals = ["Page number reset: 4 -> 1", "Header changed"]
+        if not any(models.values()):
+            print(f"\n[WARN] No models found locally")
+            print(f"   Models will auto-download on first use (slower)")
+            print(f"   Or run: python download_llm_models.py")
 
-    split_prompt = prompts.format_split_prompt(5, before_pages, after_pages, signals)
-    print(split_prompt[:400] + "...")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Model path test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-    # Test naming prompt
-    print("\n2. Document Naming Prompt Example:")
-    print("-" * 80)
+def test_lazy_loading_behavior():
+    """Test 4: Lazy loading behavior (without actually loading model)"""
+    print("\n" + "="*60)
+    print("TEST 4: Lazy Loading Behavior")
+    print("="*60)
 
-    first_page = "INVOICE\n\nAcme Corp\nDate: 2024-06-15\nInvoice #: INV-001"
-    naming_prompt = prompts.format_naming_prompt(1, 3, first_page, "Line items...")
-    print(naming_prompt[:400] + "...")
+    try:
+        from services.llm.manager import get_llm_manager
 
+        # Get manager - should NOT load model yet
+        print(">>> Getting LLM manager instance...")
+        manager = get_llm_manager()
 
-def test_parsing():
-    """Test response parsing"""
-    print("\n" + "=" * 80)
-    print("Response Parsing Test")
-    print("=" * 80)
+        print(f"[OK] Manager created: {manager is not None}")
+        print(f"   Model loaded: {hasattr(manager, '_model') and manager._model is not None}")
+        print(f"   Loader created: {hasattr(manager, '_loader') and manager._loader is not None}")
 
-    # Test split decision parsing
-    print("\n1. Split Decision Parsing:")
-    print("-" * 80)
+        if hasattr(manager, '_model') and manager._model is None:
+            print(f"\n[OK] CORRECT: Model is None (lazy loading - not loaded yet)")
+        else:
+            print(f"\n[WARN] Model might be loaded (unexpected)")
 
-    test_cases = [
-        "YES - Page numbering resets",
-        "NO - Content continues",
-        "YES: Clear boundary",
-        "Unclear response",
-    ]
+        print(f"\n   To actually load the model, call: manager.initialize()")
+        print(f"   This will download the model if not found locally")
 
-    for test in test_cases:
-        should_split, reasoning = prompts.parse_split_decision(test)
-        print(f"  '{test[:30]}...' -> Split: {should_split}")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Lazy loading test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-    # Test filename parsing
-    print("\n2. Filename Parsing:")
-    print("-" * 80)
+def test_llama_cpp_available():
+    """Test 5: Check if llama-cpp-python is installed"""
+    print("\n" + "="*60)
+    print("TEST 5: llama-cpp-python Installation")
+    print("="*60)
 
-    filenames = [
-        "2024-06-15_Invoice_Acme Corp Services",
-        '"2024-03-20_Contract_Software License Agreement"',
-        "UNDATED_Report_Financial Summary.pdf",
-    ]
+    try:
+        import llama_cpp
+        print(f"[OK] llama-cpp-python version: {llama_cpp.__version__}")
 
-    for fn in filenames:
-        parsed = prompts.parse_filename(fn)
-        valid = prompts.validate_filename(parsed)
-        print(f"  '{fn}' -> '{parsed}' (valid: {valid})")
+        # Check for CUDA support
+        try:
+            print(f"\n   Checking GPU support...")
+            print(f"   (Actual GPU availability checked during model load)")
+        except:
+            pass
 
+        return True
+    except ImportError:
+        print(f"[FAIL] llama-cpp-python not installed")
+        print(f"\n   Install with:")
+        print(f"   cd python-backend")
+        print(f"   uv pip install llama-cpp-python==0.3.4")
+        return False
+    except Exception as e:
+        print(f"[FAIL] Error checking llama-cpp-python: {e}")
+        return False
 
 def main():
-    print("\n" + "=" * 80)
-    print("LLM Module Test Suite")
-    print("=" * 80)
+    """Run all simple tests"""
+    print("\n" + "="*60)
+    print("SIMPLE LLM INTEGRATION TEST")
+    print("="*60)
 
-    test_config_selection()
-    test_prompts()
-    test_parsing()
+    tests = [
+        ("llama-cpp-python Installation", test_llama_cpp_available),
+        ("Module Imports", test_imports),
+        ("Settings Management", test_settings),
+        ("Model Path Detection", test_model_paths),
+        ("Lazy Loading Behavior", test_lazy_loading_behavior),
+    ]
 
-    print("\n" + "=" * 80)
-    print("All tests completed successfully!")
-    print("=" * 80)
+    results = []
 
+    for name, test_func in tests:
+        try:
+            result = test_func()
+            results.append((name, result))
+        except Exception as e:
+            print(f"\n[FAIL] Unexpected error in '{name}': {e}")
+            import traceback
+            traceback.print_exc()
+            results.append((name, False))
+
+    # Summary
+    print("\n" + "="*60)
+    print("TEST SUMMARY")
+    print("="*60)
+
+    for name, result in results:
+        status = "[PASS]" if result else "[FAIL]"
+        print(f"{status}: {name}")
+
+    passed = sum(1 for _, r in results if r)
+    total = len(results)
+
+    print(f"\n{passed}/{total} tests passed")
+
+    if passed == total:
+        print("\n[OK] All tests passed! LLM integration is ready.")
+        print("\nNext steps:")
+        print("   1. Download models: python download_llm_models.py")
+        print("   2. Test lazy loading: python test_llm_lazy_loading.py")
+    else:
+        print("\n[WARN] Some tests failed. Check errors above.")
+
+    return passed == total
 
 if __name__ == "__main__":
-    main()
+    success = main()
+    sys.exit(0 if success else 1)

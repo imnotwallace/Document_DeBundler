@@ -42,7 +42,8 @@ The main class with the following detection methods:
   - Computes cosine similarity between consecutive pages
 
 - `detect_with_clustering()` - DBSCAN clustering on embeddings
-  - Configurable eps (default 0.5) and min_samples (default 3)
+  - Configurable eps (default 0.5) and min_samples (default 1)
+  - min_samples=1 allows detection of single-page and small document segments
   - Medium confidence (0.6) for cluster boundaries
   - Uses cosine metric for semantic similarity
 
@@ -121,8 +122,9 @@ Simple approach using first and last lines. Could be enhanced with:
 ### 3. Clustering Parameters
 Default DBSCAN parameters:
 - `eps=0.5` - Distance threshold for cosine similarity
-- `min_samples=3` - Minimum pages per cluster
-These are configurable and may need tuning based on real-world data.
+- `min_samples=1` - Minimum samples for DBSCAN core points (allows single-page documents)
+
+**Note**: Setting `min_samples=1` is critical for detecting small document segments (1-2 pages) within bundled PDFs. Previously set to 3, which caused small documents to be skipped or classified as noise.
 
 ### 4. Confidence Aggregation
 Chose max-based aggregation with bonuses:
@@ -167,8 +169,8 @@ Chose max-based aggregation with bonuses:
    - Frequency analysis
 
 3. **Adaptive clustering:**
-   - Auto-tune eps based on document
-   - Dynamic min_samples based on document length
+   - Auto-tune eps based on document characteristics
+   - ~~Dynamic min_samples based on document length~~ (IMPLEMENTED: now fixed at 1)
 
 4. **Page number robustness:**
    - OCR confidence scores

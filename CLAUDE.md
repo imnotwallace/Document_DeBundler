@@ -4,7 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Document De-Bundler is a Tauri-based desktop application for processing, splitting, and organizing PDF documents with OCR capabilities. The app can handle PDFs up to 5GB and runs entirely locally with no cloud dependencies.
+Document De-Bundler is a Tauri-based desktop application for processing, splitting, and organizing PDF documents with advanced OCR and ML-powered document separation capabilities. The app can handle PDFs up to 5GB and runs entirely locally with no cloud dependencies.
+
+**Key Capabilities**:
+- **PDF Processing**: Handle large PDFs with intelligent splitting and organization
+- **OCR**: Optical character recognition with GPU acceleration (PaddleOCR/Tesseract)
+- **Document De-Bundling**: ML-powered intelligent document separation using semantic analysis
+- **Semantic Analysis**: Content-based document grouping using Nomic Embed v1.5 embeddings
+- **LLM Integration**: AI-powered naming suggestions and intelligent splitting recommendations
+- **Local-First**: All processing including ML/AI runs locally without cloud dependencies
 
 ## Critical Project Constraints
 
@@ -46,6 +54,8 @@ Frontend (Svelte) ←→ Rust Core (Tauri) ←→ Python Backend
    - Communicates via JSON over stdin/stdout
    - Services: PDF processing, OCR, naming, bundling
    - Designed for streaming/incremental processing
+   - **ML/AI Services**: Document de-bundling, semantic analysis, LLM integration
+   - **Dependencies**: sentence-transformers (Nomic Embed v1.5), scikit-learn (DBSCAN), PaddleOCR/PaddlePaddle 3.0+
 
 ### Communication Flow
 
@@ -93,9 +103,9 @@ npm run build
 
 ### Testing
 ```bash
-# Python tests (activate venv first)
+# Python tests (activate .venv first)
 cd python-backend
-venv\Scripts\activate  # or source venv/bin/activate
+.venv\Scripts\activate  # or source .venv/bin/activate
 pytest
 pytest --cov  # with coverage
 
@@ -152,6 +162,15 @@ flake8 .
   - `manager.py`: Engine factory and lifecycle management
   - `engines/paddleocr_engine.py`: PaddleOCR implementation (primary)
   - `engines/tesseract_engine.py`: Tesseract implementation (fallback)
+  - `vram_monitor.py`: Real-time VRAM tracking for memory management
+  - `text_quality.py`: OCR quality analysis
+- `python-backend/services/llm/`: LLM integration module
+  - `config.py`: LLM configuration
+  - `prompts.py`: Prompt templates for naming and splitting suggestions
+- `python-backend/services/split_detection.py`: ML-based document splitting using DBSCAN clustering
+- `python-backend/services/embedding_service.py`: Semantic analysis using Nomic Embed v1.5
+- `python-backend/services/cache_manager.py`: Performance caching for embeddings and analysis results
+- `python-backend/services/resource_path.py`: Bundled resource management
 - `python-backend/services/naming_service.py`: Document naming logic
 - `python-backend/services/bundler.py`: ZIP creation and file organization
 
@@ -198,6 +217,82 @@ const result = await invoke<ReturnType>("my_new_command", { param: "value" });
 {"type": "progress", "data": {"current": 10, "total": 100, "message": "Processing..."}}
 {"type": "result", "data": {...}}
 {"type": "error", "data": {"message": "Error description"}}
+```
+
+### Using Document De-Bundling Services
+
+**Basic Pattern**:
+```python
+from services.split_detection import SplitDetector
+from services.embedding_service import EmbeddingService
+from services.cache_manager import get_cache_manager
+from services.pdf_processor import PDFProcessor
+
+# Initialize services
+cache = get_cache_manager()
+embedding_service = EmbeddingService(device='cpu', model_type='text')
+detector = SplitDetector()
+
+# Process document with split detection
+# Note: The actual workflow uses detect_splits_for_document() which handles
+# caching and orchestration. For custom detection, use SplitDetector directly:
+
+with PDFProcessor(pdf_path) as pdf:
+    # Extract text from all pages
+    page_texts = []
+    for i in range(pdf.page_count):
+        if pdf.has_text_layer(i):
+            text = pdf.extract_text(i)
+        else:
+            # Use OCR if needed
+            ocr = OCRService(gpu=True)
+            text = ocr.process_pdf_page(pdf_path, i)
+            ocr.cleanup()
+        page_texts.append(text)
+
+    # Generate embeddings
+    embeddings = embedding_service.generate_embeddings(page_texts)
+
+    # Run multiple detection methods
+    all_splits = []
+    all_splits.append(detector.detect_page_number_reset(
+        [{'page_num': i, 'text': t} for i, t in enumerate(page_texts)]
+    ))
+    all_splits.append(detector.detect_blank_pages(
+        [{'page_num': i, 'text': t} for i, t in enumerate(page_texts)]
+    ))
+    all_splits.append(detector.detect_semantic_discontinuity('doc_id', embeddings))
+    all_splits.append(detector.detect_with_clustering(
+        embeddings,
+        eps=0.5,       # Cluster distance threshold (0.3-0.7)
+        min_samples=1  # Internal param, allows 1-2 page documents
+    ))
+
+    # Combine signals
+    candidates = detector.combine_signals(all_splits)
+
+    # Extract split pages (pages with high confidence)
+    split_pages = [0] + [c['page'] for c in candidates if c['confidence'] >= 0.5]
+    split_pages.append(len(page_texts))  # Add end
+
+    # Split and save documents
+    for idx in range(len(split_pages) - 1):
+        start, end = split_pages[idx], split_pages[idx + 1]
+        output_path = f"{output_dir}/document_{idx+1}.pdf"
+        pdf.extract_pages(start, end, output_path)
+```
+
+**With Caching for Performance**:
+```python
+# Cache embeddings for reuse
+pdf_hash = hashlib.md5(open(pdf_path, 'rb').read()).hexdigest()
+
+embeddings = cache.get_or_compute(
+    cache_key=f"embeddings_{pdf_hash}",
+    compute_func=lambda: embedding_service.generate_embeddings(page_texts)
+)
+
+# Subsequent runs use cached embeddings (near-instant)
 ```
 
 ## OCR Architecture
@@ -524,6 +619,368 @@ for i in range(0, total_pages, BATCH_SIZE):
     del batch  # Free memory
 ```
 
+## Document De-Bundling Architecture
+
+### Overview
+
+The application includes advanced **ML-powered document separation** capabilities for intelligently splitting bundled PDFs containing multiple distinct documents. This feature uses semantic analysis to understand document content and automatically detect natural split points.
+
+**Architecture Stack**:
+- **Embedding Model**: Nomic Embed v1.5 via sentence-transformers
+- **Clustering**: DBSCAN algorithm from scikit-learn
+- **Caching**: Local cache for embeddings and analysis results
+- **LLM Integration**: Optional intelligent naming suggestions
+
+### How Document De-Bundling Works
+
+```
+PDF Input
+    ↓
+Content Extraction (OCR or text layer)
+    ↓
+Semantic Embeddings (Nomic Embed v1.5)
+    ↓
+Similarity Analysis (Cosine similarity between pages)
+    ↓
+Clustering (DBSCAN groups related pages)
+    ↓
+Split Point Detection (Boundary detection)
+    ↓
+LLM Naming (Optional intelligent document names)
+    ↓
+Separated Documents
+```
+
+### Embedding Model Management
+
+The embedding service supports both **pre-bundled models** (for offline use) and **auto-download** (for convenience).
+
+**Model Variants**:
+- **Text Model**: `nomic-embed-text-v1.5` (~550MB) - Document analysis, semantic search
+- **Vision Model**: `nomic-embed-vision-v1.5` (~600MB) - Image understanding, visual analysis
+- **Multimodal** (default): Both models loaded (~1.15GB) - Cross-modal retrieval, aligned embeddings
+
+**Sequential Processing Pattern**:
+```python
+# 1. OCR Phase (GPU)
+ocr = OCRService(gpu=True)
+texts = ocr.process_batch(images)
+ocr.cleanup()  # Free GPU memory
+
+# 2. Embedding Phase (GPU) - No conflict, OCR unloaded
+embedder = EmbeddingService(device='cuda', model_type='multimodal')
+text_embeddings = embedder.generate_embeddings(texts)
+vision_embeddings = embedder.generate_vision_embeddings(images)
+embedder.cleanup()  # Free GPU memory
+```
+
+**Installation Options**:
+
+1. **Auto-Download (Default)**:
+   - Models download automatically on first use
+   - Cached in user directory (Windows: `%USERPROFILE%\.cache\huggingface\`)
+   - No pre-installation needed
+
+2. **Pre-Install (Recommended for Offline)**:
+   ```bash
+   cd python-backend
+   source venv/bin/activate  # or venv\Scripts\activate on Windows
+   python download_embedding_models.py
+   ```
+   - Downloads both models to `models/embeddings/`
+   - Faster first-run experience
+   - Required for offline/air-gapped systems
+
+**Model Detection**:
+```python
+from services.resource_path import verify_embedding_models
+
+models = verify_embedding_models()
+# Returns: {'text': True/False, 'vision': True/False}
+```
+
+The embedding service automatically:
+1. Checks for bundled models in `models/embeddings/`
+2. Falls back to auto-download from HuggingFace if not found
+3. Logs which source is being used
+
+**Model Locations**:
+- **Bundled**: `python-backend/models/embeddings/text/` and `.../vision/`
+- **Auto-downloaded**: `~/.cache/huggingface/hub/models--nomic-ai--nomic-embed-*`
+
+See `python-backend/models/embeddings/README.md` for detailed installation instructions.
+
+### Using the De-Bundling Services
+
+**Basic Document Splitting**:
+```python
+from services.split_detection import SplitDetector, detect_splits_for_document
+from services.embedding_service import EmbeddingService
+from services.cache_manager import get_cache_manager
+
+# High-level API: Use detect_splits_for_document() function
+# This handles caching, embedding generation, and orchestration automatically
+num_splits = detect_splits_for_document(
+    doc_id='unique_doc_id',
+    use_llm_refinement=False,  # Optional LLM-based refinement
+    progress_callback=lambda curr, total, msg: print(f"{msg} ({curr}/{total})")
+)
+
+# Low-level API: Use SplitDetector class directly for custom workflows
+cache = get_cache_manager()
+embedding_service = EmbeddingService(device='cuda', model_type='multimodal')
+detector = SplitDetector()
+
+# Analyze document
+with PDFProcessor(pdf_path) as pdf:
+    # Extract text from all pages
+    page_texts = [pdf.extract_text(i) for i in range(pdf.page_count)]
+
+    # Generate embeddings
+    embeddings = embedding_service.generate_embeddings(page_texts)
+
+    # Run detection methods
+    all_splits = []
+    all_splits.append(detector.detect_page_number_reset(
+        [{'page_num': i, 'text': t} for i, t in enumerate(page_texts)]
+    ))
+    all_splits.append(detector.detect_with_clustering(
+        embeddings,
+        eps=0.5,       # Cluster distance (0.3-0.7)
+        min_samples=1  # Allows single/small documents
+    ))
+
+    # Combine signals and get candidates
+    candidates = detector.combine_signals(all_splits)
+
+    # Extract high-confidence split pages: [0, 15, 32, 67]
+    split_pages = [0] + [c['page'] for c in candidates if c['confidence'] >= 0.5]
+```
+
+**With Caching for Performance**:
+```python
+from services.cache_manager import CacheManager
+
+# Cache embeddings for reuse
+cache = CacheManager()
+
+# First run: generates and caches embeddings
+embeddings = cache.get_or_compute(
+    cache_key=f"embeddings_{pdf_hash}",
+    compute_func=lambda: embedding_service.generate_embeddings(page_texts)
+)
+
+# Subsequent runs: uses cached embeddings (instant)
+```
+
+**Multimodal Semantic Analysis**:
+```python
+from services.embedding_service import EmbeddingService
+
+# Initialize with GPU acceleration and multimodal support
+embedder = EmbeddingService(device='cuda', model_type='multimodal')
+
+# Generate text embeddings for pages
+text_embeddings = embedder.generate_embeddings(
+    texts=page_texts,
+    batch_size=32  # Adjust based on GPU memory
+)
+
+# Generate vision embeddings for page images (for visual similarity)
+vision_embeddings = embedder.generate_vision_embeddings(
+    images=page_images,  # List of numpy arrays or file paths
+    batch_size=32
+)
+
+# Compute text similarity between consecutive pages
+text_sim_matrix = embedder.compute_similarity_matrix(text_embeddings)
+
+# Compute vision similarity
+vision_sim_matrix = embedder.compute_similarity_matrix(vision_embeddings)
+
+# Cross-modal similarity (text to image)
+for i in range(len(text_embeddings)):
+    cross_modal_sim = embedder.compute_similarity(text_embeddings[i], vision_embeddings[i])
+    print(f"Page {i} text-vision alignment: {cross_modal_sim:.2f}")
+
+# Cleanup when done
+embedder.cleanup()  # Frees GPU memory
+```
+
+**LLM Integration for Naming**:
+```python
+from services.llm.config import get_llm_config
+from services.llm.prompts import generate_naming_prompt
+
+# Extract content from document segment
+segment_preview = " ".join(page_texts[start:end][:500])  # First 500 chars
+
+# Generate intelligent name suggestion
+prompt = generate_naming_prompt(segment_preview)
+# LLM processing would happen here
+# suggested_name = llm_service.generate(prompt)
+```
+
+### Configuration and Tuning
+
+**Sensitivity Thresholds**:
+```python
+# Adjust DBSCAN eps parameter for clustering sensitivity
+detector = SplitDetector()
+embeddings = embedding_service.generate_embeddings(page_texts)
+
+# Conservative (fewer splits, larger clusters)
+splits = detector.detect_with_clustering(embeddings, eps=0.7, min_samples=1)
+
+# Moderate (balanced)
+splits = detector.detect_with_clustering(embeddings, eps=0.5, min_samples=1)
+
+# Aggressive (more splits, smaller clusters)
+splits = detector.detect_with_clustering(embeddings, eps=0.3, min_samples=1)
+
+# Note: min_samples is fixed at 1 internally to support 1-2 page documents
+# It is not user-configurable through the high-level API
+```
+
+**Embedding Model Configuration**:
+```python
+# Default: Multimodal with GPU (recommended)
+embedder = EmbeddingService(device='cuda', model_type='multimodal')
+
+# Text-only mode (lighter memory footprint)
+embedder = EmbeddingService(device='cuda', model_type='text')
+
+# Vision-only mode
+embedder = EmbeddingService(device='cuda', model_type='vision')
+
+# CPU fallback (slower, no GPU required)
+embedder = EmbeddingService(device='cpu', model_type='multimodal')
+```
+
+### Performance Characteristics
+
+**Embedding Generation**:
+- **GPU Mode (CUDA/DirectML)**: ~0.3-0.8 seconds per page
+- **CPU Mode**: ~1-3 seconds per page
+- **Batch Processing**: 32-64 pages at once for efficiency
+
+**DBSCAN Clustering**:
+- Near-instant for documents up to 1000 pages
+- Scales linearly with page count
+- Memory: ~100MB per 1000 pages for embeddings
+
+**Caching Benefits**:
+- First analysis: Full processing time
+- Subsequent analyses: Near-instant (cached embeddings)
+- Cache stored in: `python-backend/.cache/`
+
+### Integration with PDF Processor
+
+**Complete Workflow (Sequential GPU Processing)**:
+```python
+def process_bundled_pdf(pdf_path, output_dir):
+    with PDFProcessor(pdf_path) as pdf:
+        # Phase 1: OCR (GPU)
+        page_texts = []
+        page_images = []
+        ocr = OCRService(gpu=True) if needs_ocr else None
+
+        for i in range(pdf.page_count):
+            if pdf.has_text_layer(i):
+                text = pdf.extract_text(i)
+            else:
+                text = ocr.process_pdf_page(pdf_path, i)
+            page_texts.append(text)
+
+            # Also capture page images for visual embedding
+            page_images.append(pdf.render_page_to_image(i, dpi=300))
+
+        # Cleanup OCR to free GPU memory
+        if ocr:
+            ocr.cleanup()
+            import gc; gc.collect()
+            import torch; torch.cuda.empty_cache()
+
+        # Phase 2: Embedding (GPU) - No conflict, OCR unloaded
+        cache = get_cache_manager()
+        embedder = EmbeddingService(device='cuda', model_type='multimodal')
+        detector = SplitDetector()
+
+        # Generate multimodal embeddings
+        text_embeddings = embedder.generate_embeddings(page_texts)
+        vision_embeddings = embedder.generate_vision_embeddings(page_images)
+
+        # Detect splits using multimodal analysis
+        all_splits = []
+        all_splits.append(detector.detect_page_number_reset(
+            [{'page_num': i, 'text': t} for i, t in enumerate(page_texts)]
+        ))
+        all_splits.append(detector.detect_with_clustering(text_embeddings, eps=0.5, min_samples=1))
+
+        # Combine signals and get split pages
+        candidates = detector.combine_signals(all_splits)
+        split_pages = [0] + [c['page'] for c in candidates if c['confidence'] >= 0.5]
+        split_pages.append(len(page_texts))
+
+        # Cleanup embedding models to free GPU
+        embedder.cleanup()
+
+        # Phase 3: Save split documents
+        for idx in range(len(split_pages) - 1):
+            start, end = split_pages[idx], split_pages[idx + 1]
+            output_path = f"{output_dir}/document_{idx+1}.pdf"
+            pdf.extract_pages(start, end, output_path)
+```
+
+### Memory Management
+
+**Embedding Storage**:
+- Each embedding: ~768 floats (Nomic Embed) = ~3KB per page
+- 1000-page PDF: ~3MB of embeddings in memory
+- Cached to disk automatically
+
+**Batch Processing**:
+```python
+# For very large documents, process in chunks
+CHUNK_SIZE = 100
+
+for chunk_start in range(0, len(page_texts), CHUNK_SIZE):
+    chunk_end = min(chunk_start + CHUNK_SIZE, len(page_texts))
+    chunk_texts = page_texts[chunk_start:chunk_end]
+    
+    embeddings = embedding_service.generate_embeddings(chunk_texts)
+    # Process chunk...
+    
+    del embeddings  # Free memory
+    gc.collect()
+```
+
+### Troubleshooting
+
+**Poor Split Detection**:
+- Lower eps parameter (e.g., 0.3) in `detect_with_clustering()` for more aggressive splitting
+- Raise eps parameter (e.g., 0.7) if getting too many small fragments
+- Check text extraction quality (OCR accuracy affects embeddings)
+- Note: min_samples is fixed at 1 to support small documents (not user-configurable)
+
+**Slow Performance**:
+- Enable GPU: `EmbeddingService(use_gpu=True)`
+- Verify GPU available: Check logs for "GPU: enabled"
+- Use caching: Subsequent runs will be much faster
+
+**Out of Memory**:
+- Reduce batch size for embeddings: `batch_size=16`
+- Process document in chunks (see Memory Management above)
+- Clear cache if disk space low: `cache.clear()`
+
+### Documentation
+
+For detailed implementation specifications, see:
+- `docs/DEBUNDLING_QUICK_START.md` - Quick start guide
+- `docs/EMBEDDING_SERVICE_IMPLEMENTATION.md` - Embedding service details
+- `docs/IMPLEMENTATION_SPEC_DEBUNDLING.md` - Complete specification
+- `docs/SPLIT_DETECTION_IMPLEMENTATION_REPORT.md` - Algorithm analysis
+
 ## File System Permissions
 
 Tauri requires explicit permission grants. Current permissions in `tauri.conf.json`:
@@ -677,6 +1134,29 @@ After `npm run tauri:build`:
 - Close other applications
 - Process smaller PDFs for testing
 
+## Documentation
+
+Detailed implementation documentation is available in the `docs/` directory:
+
+### Feature Implementation
+- **DEBUNDLING_QUICK_START.md** - Quick start guide for document de-bundling features
+- **EMBEDDING_SERVICE_IMPLEMENTATION.md** - Embedding service architecture and usage
+- **IMPLEMENTATION_SPEC_DEBUNDLING.md** - Complete technical specification for de-bundling
+- **SPLIT_DETECTION_IMPLEMENTATION_REPORT.md** - Algorithm analysis and performance tuning
+- **TESSERACT_BUNDLING.md** - Tesseract OCR engine bundling guide
+- **UI_IMPLEMENTATION_PLAN.md** - UI/UX implementation guidelines
+
+### Testing & Quality
+- **TEST_FIXES_IMPLEMENTATION_PLAN.md** - Implementation plan for resolving test failures
+- **TEST_RESULTS_2025-11-01.md** - Comprehensive test suite results and analysis
+- **PHASE_3_TEST_REPORT.md** - Phase 3 testing documentation
+
+### Project Management
+- **LLM_INTEGRATION.md** - LLM integration documentation
+- **handoff/** - Project handoff documentation
+
+When working on features related to document de-bundling, semantic analysis, or ML-powered splitting, consult these documents for detailed specifications and implementation guidelines.
+
 ## Design Principles
 
 1. **Local-First**: No cloud dependencies, all processing local
@@ -684,3 +1164,5 @@ After `npm run tauri:build`:
 3. **Streaming**: Handle large files without full buffering
 4. **Progressive**: Show progress, don't block UI
 5. **Fail-Safe**: Graceful error handling, informative messages
+- Always use .venv python for any python testing or packaging in this project
+- Never use unicode characters in python scripts

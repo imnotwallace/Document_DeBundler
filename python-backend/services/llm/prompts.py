@@ -102,9 +102,7 @@ def format_split_prompt(
     """
     # Extract text from last 3 pages before split
     if before_pages:
-        before_text = "
----
-".join([
+        before_text = "\n---\n".join([
             f"Page {p['page_num']}: {p['text'][:300]}..."
             for p in before_pages[-3:]  # Last 3 pages before split
         ])
@@ -113,9 +111,7 @@ def format_split_prompt(
 
     # Extract text from first 3 pages after split
     if after_pages:
-        after_text = "
----
-".join([
+        after_text = "\n---\n".join([
             f"Page {p['page_num']}: {p['text'][:300]}..."
             for p in after_pages[:3]  # First 3 pages after split
         ])

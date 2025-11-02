@@ -66,11 +66,11 @@ class SplitDetector:
         splits = []
         for i, page in enumerate(pages):
             text = page['text'] or ''
-            text_length = len(text.strip())
-            if text_length < 50:
+            text_length = len(text.strip())  # Strip whitespace to detect whitespace-only pages
+            if text_length < 10:  # Very little text (truly blank or whitespace-only pages)
                 if i + 1 < len(pages):
                     next_text = pages[i + 1]['text'] or ''
-                    if len(next_text.strip()) > 100:
+                    if len(next_text.strip()) > 30:  # Next page has substantial content
                         splits.append((i + 1, 0.85, f"Blank separator page (only {text_length} chars)"))
         return splits
 
@@ -84,9 +84,9 @@ class SplitDetector:
                 splits.append((i, 0.5, f"Moderate semantic discontinuity ({similarity:.2f})"))
         return splits
 
-    def detect_with_clustering(self, embeddings: np.ndarray, eps: float = 0.5, min_samples: int = 3) -> List[Tuple[int, float, str]]:
-        if len(embeddings) < min_samples:
-            return []
+    def detect_with_clustering(self, embeddings: np.ndarray, eps: float = 0.5, min_samples: int = 1) -> List[Tuple[int, float, str]]:
+        if len(embeddings) < 1:
+            return []  # Need at least 1 page to cluster
         clustering = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine')
         labels = clustering.fit_predict(embeddings)
         splits = []
@@ -198,7 +198,7 @@ def test_clustering():
     embeddings = np.array(cluster1_pages + cluster2_pages)
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     embeddings = embeddings / norms
-    splits = detector.detect_with_clustering(embeddings, eps=0.3, min_samples=2)
+    splits = detector.detect_with_clustering(embeddings, eps=0.3, min_samples=1)
     print(f"Detected {len(splits)} cluster boundaries:")
     for page_num, confidence, reason in splits:
         print(f"  - Page {page_num}: {reason} (confidence: {confidence:.2f})")

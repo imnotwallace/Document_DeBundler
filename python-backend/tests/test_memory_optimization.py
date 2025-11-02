@@ -6,6 +6,7 @@ Tests VRAM monitoring, adaptive batch sizing, and configuration generation
 import sys
 import logging
 from pathlib import Path
+import pytest
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -22,13 +23,17 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def test_hardware_detection():
+@pytest.fixture(scope="module")
+def capabilities():
+    """Fixture that provides hardware capabilities for all tests"""
+    return detect_hardware_capabilities()
+
+
+def test_hardware_detection(capabilities):
     """Test hardware capability detection"""
     logger.info("=" * 60)
     logger.info("Testing Hardware Detection")
     logger.info("=" * 60)
-
-    capabilities = detect_hardware_capabilities()
 
     logger.info(f"GPU Available: {capabilities['gpu_available']}")
     logger.info(f"CUDA Available: {capabilities['cuda_available']}")
@@ -38,7 +43,11 @@ def test_hardware_detection():
     logger.info(f"CPU Count: {capabilities['cpu_count']}")
     logger.info(f"Platform: {capabilities['platform']}")
 
-    return capabilities
+    # Add assertions to validate the fixture data
+    assert 'gpu_available' in capabilities
+    assert 'system_memory_gb' in capabilities
+    assert capabilities['system_memory_gb'] > 0
+    assert capabilities['cpu_count'] > 0
 
 
 def test_batch_size_calculation(capabilities):
@@ -67,6 +76,14 @@ def test_batch_size_calculation(capabilities):
         )
         logger.info(f"  {description}: batch_size = {batch_size}")
 
+        # Add assertions
+        assert batch_size > 0, f"Batch size must be positive, got {batch_size} for {description}"
+        assert batch_size <= 100, f"Batch size too large: {batch_size} for {description}"
+
+    # Verify target hardware gets batch_size = 25
+    target_batch = get_optimal_batch_size(use_gpu=True, gpu_memory_gb=4.0, system_memory_gb=16.0)
+    assert target_batch == 25, f"Expected batch size 25 for 4GB VRAM, got {target_batch}"
+
     # Test CPU scenarios
     cpu_configs = [
         (4, "4GB RAM (minimal)"),
@@ -83,6 +100,10 @@ def test_batch_size_calculation(capabilities):
             system_memory_gb=ram_gb
         )
         logger.info(f"  {description}: batch_size = {batch_size}")
+
+        # Add assertions
+        assert batch_size > 0, f"Batch size must be positive, got {batch_size} for {description}"
+        assert batch_size <= 100, f"Batch size too large: {batch_size} for {description}"
 
 
 def test_adaptive_dpi(capabilities):
@@ -106,6 +127,9 @@ def test_adaptive_dpi(capabilities):
         )
         logger.info(f"  {quality}: {dpi} DPI")
 
+        # Add assertions
+        assert 100 <= dpi <= 1200, f"DPI out of reasonable range: {dpi} for {quality}"
+
     # Test 4GB VRAM scenario
     logger.info("\nTarget Hardware (4GB VRAM, 16GB RAM):")
     for quality in quality_levels:
@@ -116,6 +140,14 @@ def test_adaptive_dpi(capabilities):
             target_quality=quality
         )
         logger.info(f"  {quality}: {dpi} DPI")
+
+        # Add assertions
+        assert 100 <= dpi <= 1200, f"DPI out of reasonable range: {dpi} for {quality}"
+
+    # Verify DPI increases with quality level
+    low_dpi = get_adaptive_dpi(True, 4.0, 16.0, "low")
+    high_dpi = get_adaptive_dpi(True, 4.0, 16.0, "high")
+    assert low_dpi <= high_dpi, f"Low quality DPI ({low_dpi}) should be <= high quality DPI ({high_dpi})"
 
 
 def test_vram_monitor():
@@ -166,6 +198,13 @@ def test_default_config(capabilities):
     logger.info(f"Hybrid Mode Enabled: {config.enable_hybrid_mode}")
     logger.info(f"VRAM Monitoring: {config.enable_vram_monitoring}")
     logger.info(f"Adaptive Batch Sizing: {config.enable_adaptive_batch_sizing}")
+
+    # Add assertions
+    assert config.engine in ["paddleocr", "tesseract"], f"Unknown engine: {config.engine}"
+    assert config.batch_size > 0, f"Batch size must be positive: {config.batch_size}"
+    assert config.cpu_batch_size > 0, f"CPU batch size must be positive: {config.cpu_batch_size}"
+    assert config.max_memory_mb > 0, f"Max memory must be positive: {config.max_memory_mb}"
+    assert config.num_threads > 0, f"Thread count must be positive: {config.num_threads}"
 
     # Explain hybrid mode decision
     if config.enable_hybrid_mode:

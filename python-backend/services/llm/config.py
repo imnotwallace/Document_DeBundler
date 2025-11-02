@@ -57,14 +57,14 @@ def select_optimal_llm_config(gpu_memory_gb: Optional[float] = None) -> Dict[str
         return {
             'model_name': 'Phi-3 Mini (4GB Optimized)',
             'model_id': 'microsoft/Phi-3-mini-4k-instruct-gguf',
-            'model_file': 'Phi-3-mini-4k-instruct-q4_k_m.gguf',
-            'quantization': 'Q4_K_M',
-            'n_gpu_layers': 28,  # 28 GPU + 4 CPU layers
+            'model_file': 'phi-3-mini-4k-instruct-q4.gguf',
+            'quantization': 'Q4',
+            'n_gpu_layers': 20,  # Conservative 20 GPU layers for 4GB VRAM
             'n_batch': 256,
             'n_ctx': 4096,
             'expected_vram_gb': 2.3,
             'offload_strategy': 'hybrid',
-            'cpu_layers': 4
+            'cpu_layers': 12  # 32 total layers - 20 GPU = 12 CPU
         }
     elif gpu_memory_gb >= 2:
         # Low VRAM: Lighter model

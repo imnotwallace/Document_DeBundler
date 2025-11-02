@@ -45,7 +45,7 @@ def test_blank_page_detection():
         {'page_num': 0, 'text': 'This is a normal page with lots of content.'},
         {'page_num': 1, 'text': 'Another normal page with content here.'},
         {'page_num': 2, 'text': '   '},  # Blank separator
-        {'page_num': 3, 'text': 'New document starts after blank page with content.'},
+        {'page_num': 3, 'text': 'New document starts after blank page with content. This page has enough content to be detected as a real page with meaningful text that indicates a new document section.'},
     ]
 
     splits = detector.detect_blank_pages(pages)
@@ -125,7 +125,7 @@ def test_clustering():
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     embeddings = embeddings / norms
 
-    splits = detector.detect_with_clustering(embeddings, eps=0.3, min_samples=2)
+    splits = detector.detect_with_clustering(embeddings, eps=0.3, min_samples=1)
 
     print(f"Detected {len(splits)} cluster boundaries:")
     for page_num, confidence, reason in splits:
@@ -188,6 +188,68 @@ def test_combine_signals():
     print(f"  Low (ignore): >= {detector.THRESHOLD_LOW}")
 
 
+def test_small_document_segments():
+    """Test clustering detection with small document segments (1-2 pages)"""
+    print("\n=== Testing Small Document Segments ===")
+
+    detector = SplitDetector()
+
+    # Test 1: Very small document (2 pages only)
+    print("\n  Test 1a: Two-page document")
+    np.random.seed(42)
+    small_doc = np.random.randn(2, 768)
+    small_doc = small_doc / np.linalg.norm(small_doc, axis=1, keepdims=True)
+    splits = detector.detect_with_clustering(small_doc, eps=0.3, min_samples=1)
+    print(f"    Two-page document: {len(splits)} splits detected")
+    print("    PASS: No crash with 2-page document")
+
+    # Test 1b: Single-page document
+    print("\n  Test 1b: Single-page document")
+    single_page = np.random.randn(1, 768)
+    single_page = single_page / np.linalg.norm(single_page, axis=1, keepdims=True)
+    splits = detector.detect_with_clustering(single_page, eps=0.3, min_samples=1)
+    print(f"    Single-page document: {len(splits)} splits detected")
+    print("    PASS: No crash with 1-page document")
+
+    # Test 2: Bundled PDF with small segment (50 pages + 2 pages + 50 pages)
+    print("\n  Test 2: Bundled PDF with 2-page segment in middle")
+    np.random.seed(42)
+
+    # Document 1: 50 pages
+    doc1_center = np.random.randn(768)
+    doc1_center = doc1_center / np.linalg.norm(doc1_center)
+    doc1_pages = [doc1_center + np.random.randn(768) * 0.05 for _ in range(50)]
+
+    # Document 2: 2 pages only (small segment)
+    doc2_center = np.random.randn(768)
+    doc2_center = doc2_center / np.linalg.norm(doc2_center)
+    doc2_pages = [doc2_center + np.random.randn(768) * 0.05 for _ in range(2)]
+
+    # Document 3: 50 pages
+    doc3_center = np.random.randn(768)
+    doc3_center = doc3_center / np.linalg.norm(doc3_center)
+    doc3_pages = [doc3_center + np.random.randn(768) * 0.05 for _ in range(50)]
+
+    # Combine all
+    embeddings = np.array(doc1_pages + doc2_pages + doc3_pages)
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+    splits = detector.detect_with_clustering(embeddings, eps=0.3, min_samples=1)
+
+    print(f"    Detected {len(splits)} cluster boundaries:")
+    for page_num, confidence, reason in splits:
+        print(f"      - Page {page_num}: {reason} (confidence: {confidence:.2f})")
+
+    # Verify we detected the boundaries
+    # Should detect split at page 50 (start of 2-page segment) and page 52 (end of 2-page segment)
+    split_pages = [s[0] for s in splits]
+    assert 50 in split_pages, f"Expected split at page 50 (start of small segment), got {split_pages}"
+    assert 52 in split_pages, f"Expected split at page 52 (end of small segment), got {split_pages}"
+
+    print("    PASS: Small 2-page segment correctly detected within large document")
+    print("\nPASS: All small document segment tests passed")
+
+
 def main():
     """Run all tests"""
     print("=" * 60)
@@ -199,6 +261,7 @@ def main():
         test_blank_page_detection()
         test_semantic_discontinuity()
         test_clustering()
+        test_small_document_segments()
         test_combine_signals()
 
         print("\n" + "=" * 60)
