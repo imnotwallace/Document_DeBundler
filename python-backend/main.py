@@ -63,6 +63,8 @@ class IPCHandler:
             self.handle_process(command)
         elif cmd_type == "ocr_batch":
             self.handle_ocr_batch(command)
+        elif cmd_type == "get_hardware_capabilities":
+            self.handle_get_hardware_capabilities(command)
         elif cmd_type == "cancel":
             self.handle_cancel()
         else:
@@ -470,6 +472,7 @@ class IPCHandler:
             options = command.get('options', {})
             files = options.get('files', [])
             output_dir = options.get('output_dir')
+            ocr_config = options.get('ocr_config', {})
 
             # Validate inputs
             if not files:
@@ -482,6 +485,10 @@ class IPCHandler:
 
             logger.info(f"Starting OCR batch: {len(files)} files")
             logger.info(f"Output directory: {output_dir}")
+            if ocr_config:
+                logger.info(f"Custom OCR configuration provided: use_gpu={ocr_config.get('use_gpu', True)}, "
+                           f"dpi={ocr_config.get('dpi', 300)}, "
+                           f"engine={ocr_config.get('engine', 'auto')}")
 
             # Create output directory if needed
             os.makedirs(output_dir, exist_ok=True)
@@ -498,11 +505,17 @@ class IPCHandler:
                 # Send progress event
                 self.send_progress(current, total, message, percent)
 
-            # Create service instance
+            # Extract key configuration parameters
+            use_gpu = ocr_config.get('use_gpu', True)
+            dpi = ocr_config.get('dpi', 300)
+
+            # Create service instance with configuration
             # Note: Cancellation is handled via progress_callback raising exception
             service = OCRBatchService(
                 progress_callback=progress_callback,
-                cancellation_flag=None
+                cancellation_flag=None,
+                use_gpu=use_gpu,
+                dpi=dpi
             )
 
             # Process batch
@@ -531,6 +544,58 @@ class IPCHandler:
                     logger.info("OCR batch service cleanup complete")
                 except Exception as e:
                     logger.warning(f"OCR batch cleanup error: {e}")
+
+    def handle_get_hardware_capabilities(self, command: Dict[str, Any]):
+        """
+        Get hardware capabilities for OCR configuration
+        Returns GPU/CPU info and recommended settings
+        """
+        try:
+            from services.ocr.config import detect_hardware_capabilities, get_optimal_batch_size, get_adaptive_dpi
+
+            logger.info("Detecting hardware capabilities...")
+
+            # Detect hardware
+            capabilities = detect_hardware_capabilities()
+
+            # Calculate optimal batch size
+            gpu_batch_size = get_optimal_batch_size(
+                use_gpu=True,
+                gpu_memory_gb=capabilities.get('gpu_memory_gb', 0),
+                system_memory_gb=capabilities.get('system_memory_gb', 0)
+            )
+
+            # Calculate recommended DPI
+            recommended_dpi = get_adaptive_dpi(
+                use_gpu=capabilities.get('gpu_available', False),
+                gpu_memory_gb=capabilities.get('gpu_memory_gb', 0),
+                system_memory_gb=capabilities.get('system_memory_gb', 0),
+                target_quality='balanced'
+            )
+
+            # Build response
+            result = {
+                'gpu_available': capabilities.get('gpu_available', False),
+                'cuda_available': capabilities.get('cuda_available', False),
+                'gpu_memory_gb': capabilities.get('gpu_memory_gb', 0.0),
+                'system_memory_gb': capabilities.get('system_memory_gb', 0.0),
+                'cpu_count': capabilities.get('cpu_count', 1),
+                'platform': capabilities.get('platform', 'unknown'),
+                'recommended_batch_size': gpu_batch_size,
+                'recommended_dpi': recommended_dpi
+            }
+
+            logger.info(f"Hardware capabilities: GPU={result['gpu_available']}, "
+                       f"VRAM={result['gpu_memory_gb']:.1f}GB, "
+                       f"RAM={result['system_memory_gb']:.1f}GB")
+
+            # Send result
+            self.send_result(result)
+
+        except Exception as e:
+            error_msg = f"Failed to detect hardware capabilities: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self.send_error(error_msg)
 
     def handle_cancel(self):
         """Cancel current operation"""

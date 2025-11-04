@@ -276,6 +276,7 @@ pub async fn start_processing(
 pub async fn start_batch_ocr(
     files: Vec<String>,
     destination: String,
+    ocr_config: Option<serde_json::Value>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -338,6 +339,11 @@ pub async fn start_batch_ocr(
         files.iter().map(|f| serde_json::Value::String(f.clone())).collect()
     ));
     options.insert("output_dir".to_string(), serde_json::Value::String(destination.clone()));
+
+    // Add OCR configuration if provided
+    if let Some(config) = ocr_config {
+        options.insert("ocr_config".to_string(), config);
+    }
 
     // Send batch command
     let command = PythonCommand {
@@ -426,6 +432,58 @@ pub async fn get_processing_status(state: State<'_, AppState>) -> Result<Process
 }
 
 /// Quits the application
+/// Get hardware capabilities for OCR configuration
+#[tauri::command]
+pub async fn get_hardware_capabilities(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }  // Lock drops here
+
+    // Start event loop in separate scope to avoid deadlock
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Send hardware capabilities command
+    let command = PythonCommand {
+        command: "get_hardware_capabilities".to_string(),
+        file_path: None,
+        options: None,
+    };
+
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.send_command(command)?;
+    }
+
+    // For now, return a basic response
+    // In a full implementation, we'd wait for the Python response
+    // For simplicity, we'll return placeholder values
+    // The Python backend will handle actual hardware detection
+    Ok(serde_json::json!({
+        "gpu_available": false,
+        "gpu_memory_gb": 0.0,
+        "system_memory_gb": 16.0,
+        "recommended_batch_size": 10,
+        "recommended_dpi": 300
+    }))
+}
+
 #[tauri::command]
 pub fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     app.exit(0);

@@ -77,7 +77,8 @@ class OCRBatchService:
         self,
         progress_callback: Optional[Callable[[int, int, str, float, float], None]] = None,
         cancellation_flag: Optional[threading.Event] = None,
-        use_gpu: bool = True
+        use_gpu: bool = True,
+        dpi: int = 300
     ):
         """
         Initialize OCR batch service.
@@ -91,10 +92,12 @@ class OCRBatchService:
                 - eta: Estimated time remaining in seconds
             cancellation_flag: threading.Event for cancellation signaling
             use_gpu: Whether to use GPU acceleration if available
+            dpi: DPI for rendering PDF pages (default: 300)
         """
         self.progress_callback = progress_callback
         self.cancellation_flag = cancellation_flag
         self.use_gpu = use_gpu
+        self.dpi = dpi
 
         # Services (lazy initialized)
         self.ocr_service: Optional[OCRService] = None
@@ -115,6 +118,7 @@ class OCRBatchService:
             f"OCR Batch Service initialized: "
             f"GPU={self.use_gpu and self.capabilities['gpu_available']}, "
             f"batch_size={self.batch_size}, "
+            f"DPI={self.dpi}, "
             f"VRAM={self.capabilities['gpu_memory_gb']:.1f}GB, "
             f"RAM={self.capabilities['system_memory_gb']:.1f}GB"
         )
@@ -560,7 +564,7 @@ class OCRBatchService:
             # Render pages to images
             images = []
             for page_num in page_numbers:
-                image = pdf.render_page_to_image(page_num, dpi=300)
+                image = pdf.render_page_to_image(page_num, dpi=self.dpi)
                 images.append(image)
 
             # Process with OCR
