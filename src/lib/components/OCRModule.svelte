@@ -13,7 +13,9 @@
   import Button from "./shared/Button.svelte";
   import FileGrid from "./shared/FileGrid.svelte";
   import Terminal from "./shared/Terminal.svelte";
+  import AdvancedOCRModal from "./AdvancedOCRModal.svelte";
   import type { FileInfo } from "../types";
+  import { ocrSettings } from "../stores/ocrSettings";
 
   // Event payload types
   interface ProgressEvent {
@@ -40,6 +42,7 @@
   let terminalLogs: string[] = [];
   let isProcessing = false;
   let processingProgress = 0;
+  let showAdvancedModal = false;
 
   // Event listener cleanup functions
   let unlistenProgress: UnlistenFn | null = null;
@@ -280,10 +283,19 @@
         updateFileStatus(file.id, 'pending', 0);
       });
 
-      // Start batch OCR
+      // Prepare OCR options from settings
+      const ocrOptions = {
+        language: $ocrSettings.language,
+        force_cpu: $ocrSettings.forceCPU,
+        use_system_recommended_dpi: $ocrSettings.useSystemRecommendedDPI,
+        max_dpi: $ocrSettings.maxDPI,
+      };
+
+      // Start batch OCR with settings
       await invoke("start_batch_ocr", {
         files: filePaths,
         destination: $destinationFolder,
+        options: ocrOptions,
       });
 
       addLog('OCR batch started successfully. Processing...', 'info');
@@ -418,8 +430,20 @@
         </div>
       </div>
 
-      <!-- Start/Cancel OCR Button -->
+      <!-- Advanced Settings Button -->
       <div class="mt-4">
+        <Button
+          variant="secondary"
+          size="md"
+          on:click={() => showAdvancedModal = true}
+          disabled={isProcessing}
+        >
+          Advanced...
+        </Button>
+      </div>
+
+      <!-- Start/Cancel OCR Button -->
+      <div class="mt-2">
         <Button
           variant={isProcessing ? "danger" : "success"}
           size="lg"
@@ -490,3 +514,9 @@
     </div>
   </div>
 </div>
+
+<!-- Advanced OCR Settings Modal -->
+<AdvancedOCRModal
+  isOpen={showAdvancedModal}
+  onClose={() => showAdvancedModal = false}
+/>

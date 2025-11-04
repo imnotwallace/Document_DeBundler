@@ -77,7 +77,9 @@ class OCRBatchService:
         self,
         progress_callback: Optional[Callable[[int, int, str, float, float], None]] = None,
         cancellation_flag: Optional[threading.Event] = None,
-        use_gpu: bool = True
+        use_gpu: bool = True,
+        ocr_language: str = 'en',
+        max_dpi: Optional[int] = None
     ):
         """
         Initialize OCR batch service.
@@ -91,10 +93,14 @@ class OCRBatchService:
                 - eta: Estimated time remaining in seconds
             cancellation_flag: threading.Event for cancellation signaling
             use_gpu: Whether to use GPU acceleration if available
+            ocr_language: Language code for OCR (e.g., 'en', 'ch', 'french')
+            max_dpi: Maximum DPI for rendering (None = use system recommendation)
         """
         self.progress_callback = progress_callback
         self.cancellation_flag = cancellation_flag
         self.use_gpu = use_gpu
+        self.ocr_language = ocr_language
+        self.max_dpi = max_dpi
 
         # Services (lazy initialized)
         self.ocr_service: Optional[OCRService] = None
@@ -114,6 +120,8 @@ class OCRBatchService:
         logger.info(
             f"OCR Batch Service initialized: "
             f"GPU={self.use_gpu and self.capabilities['gpu_available']}, "
+            f"language={self.ocr_language}, "
+            f"max_dpi={self.max_dpi or 'auto'}, "
             f"batch_size={self.batch_size}, "
             f"VRAM={self.capabilities['gpu_memory_gb']:.1f}GB, "
             f"RAM={self.capabilities['system_memory_gb']:.1f}GB"
@@ -144,7 +152,9 @@ class OCRBatchService:
             self.ocr_service = OCRService(
                 gpu=self.use_gpu,
                 engine="paddleocr",  # Use PaddleOCR as primary
-                fallback_enabled=True
+                fallback_enabled=True,
+                language=self.ocr_language,
+                max_dpi=self.max_dpi
             )
 
             if not self.ocr_service.is_available():
@@ -155,7 +165,9 @@ class OCRBatchService:
             logger.info(
                 f"OCR engine ready: {engine_info['engine']}, "
                 f"GPU={engine_info['gpu_enabled']}, "
-                f"memory={engine_info['memory_usage_mb']:.1f}MB"
+                f"memory={engine_info['memory_usage_mb']:.1f}MB, "
+                f"language={self.ocr_language}, "
+                f"max_dpi={self.max_dpi or 'auto'}"
             )
 
         if self.vram_monitor is None and self.use_gpu and self.capabilities['gpu_available']:
@@ -314,7 +326,9 @@ class OCRBatchService:
         temp_ocr = OCRService(
             gpu=self.use_gpu,
             engine=engine,
-            fallback_enabled=False
+            fallback_enabled=False,
+            language=self.ocr_language,
+            max_dpi=self.max_dpi
         )
 
         try:
@@ -557,10 +571,11 @@ class OCRBatchService:
 
         # Normal batch processing
         def process_batch_operation():
-            # Render pages to images
+            # Render pages to images - use configured DPI or system recommendation
+            dpi = self.max_dpi if self.max_dpi else 300
             images = []
             for page_num in page_numbers:
-                image = pdf.render_page_to_image(page_num, dpi=300)
+                image = pdf.render_page_to_image(page_num, dpi=dpi)
                 images.append(image)
 
             # Process with OCR
@@ -633,7 +648,9 @@ class OCRBatchService:
             Extracted text
         """
         def process_page_operation():
-            image = pdf.render_page_to_image(page_num, dpi=300)
+            # Use configured DPI or system recommendation
+            dpi = self.max_dpi if self.max_dpi else 300
+            image = pdf.render_page_to_image(page_num, dpi=dpi)
             text = self.ocr_service.extract_text_from_array(image)
             del image
             return text

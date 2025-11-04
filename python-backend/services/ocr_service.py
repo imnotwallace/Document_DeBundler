@@ -24,7 +24,9 @@ class OCRService:
         self,
         gpu: bool = True,
         engine: Optional[str] = None,
-        fallback_enabled: bool = True
+        fallback_enabled: bool = True,
+        language: str = 'en',
+        max_dpi: Optional[int] = None
     ):
         """
         Initialize OCR service.
@@ -33,10 +35,14 @@ class OCRService:
             gpu: Whether to use GPU if available (auto-detects)
             engine: Specific engine to use ("paddleocr", "tesseract", or "auto")
             fallback_enabled: Enable fallback to alternative engine if primary fails
+            language: Language code for OCR (default: 'en')
+            max_dpi: Maximum DPI for rendering (None = use system recommendation)
         """
         self.gpu = gpu
         self.engine_name = engine
         self.fallback_enabled = fallback_enabled
+        self.language = language
+        self.max_dpi = max_dpi
         self.manager: Optional[OCRManager] = None
 
         # Initialize OCR manager
@@ -46,9 +52,12 @@ class OCRService:
                 prefer_gpu=gpu,
                 model_dir=get_model_directory()
             )
+            # Override language setting
+            config.languages = [language]
+
             self.manager = OCRManager(config=config, fallback_enabled=fallback_enabled)
             self.manager.initialize()
-            logger.info(f"OCR service initialized with {self.manager.get_engine_name()}")
+            logger.info(f"OCR service initialized with {self.manager.get_engine_name()}, language={language}")
         except Exception as e:
             logger.error(f"Failed to initialize OCR service: {e}", exc_info=True)
             self.manager = None
@@ -135,8 +144,9 @@ class OCRService:
             doc = fitz.open(pdf_path)
             page = doc[page_num]
 
-            # Render page to image (higher DPI = better quality)
-            pix = page.get_pixmap(dpi=300)
+            # Render page to image - use configured DPI or system recommendation
+            dpi = self.max_dpi if self.max_dpi else 300
+            pix = page.get_pixmap(dpi=dpi)
 
             # Convert to numpy array
             image_array = np.frombuffer(pix.samples, dtype=np.uint8)

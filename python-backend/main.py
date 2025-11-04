@@ -452,7 +452,11 @@ class IPCHandler:
         {
             "command": "ocr_batch",
             "files": ["path/to/file1.pdf", "path/to/file2.pdf"],
-            "output_dir": "path/to/output"
+            "output_dir": "path/to/output",
+            "language": "en",  # Optional: OCR language (default: English)
+            "force_cpu": false,  # Optional: Force CPU mode (default: false)
+            "use_system_recommended_dpi": true,  # Optional: Use system recommendation (default: true)
+            "max_dpi": 300  # Optional: Max DPI if not using system recommendation
         }
 
         Emits:
@@ -471,6 +475,12 @@ class IPCHandler:
             files = options.get('files', [])
             output_dir = options.get('output_dir')
 
+            # Extract OCR configuration options
+            ocr_language = options.get('language', 'en')
+            force_cpu = options.get('force_cpu', False)
+            use_system_recommended_dpi = options.get('use_system_recommended_dpi', True)
+            max_dpi = options.get('max_dpi', 300)
+
             # Validate inputs
             if not files:
                 self.send_error("No files provided for OCR batch processing")
@@ -482,6 +492,8 @@ class IPCHandler:
 
             logger.info(f"Starting OCR batch: {len(files)} files")
             logger.info(f"Output directory: {output_dir}")
+            logger.info(f"OCR config: language={ocr_language}, force_cpu={force_cpu}, "
+                       f"use_system_recommended_dpi={use_system_recommended_dpi}, max_dpi={max_dpi}")
 
             # Create output directory if needed
             os.makedirs(output_dir, exist_ok=True)
@@ -498,11 +510,14 @@ class IPCHandler:
                 # Send progress event
                 self.send_progress(current, total, message, percent)
 
-            # Create service instance
+            # Create service instance with OCR configuration
             # Note: Cancellation is handled via progress_callback raising exception
             service = OCRBatchService(
                 progress_callback=progress_callback,
-                cancellation_flag=None
+                cancellation_flag=None,
+                use_gpu=not force_cpu,
+                ocr_language=ocr_language,
+                max_dpi=max_dpi if not use_system_recommended_dpi else None
             )
 
             # Process batch
