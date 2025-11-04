@@ -276,6 +276,7 @@ pub async fn start_processing(
 pub async fn start_batch_ocr(
     files: Vec<String>,
     destination: String,
+    options: Option<serde_json::Value>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -333,17 +334,26 @@ pub async fn start_batch_ocr(
     }
 
     // Build options for batch processing
-    let mut options = serde_json::Map::new();
-    options.insert("files".to_string(), serde_json::Value::Array(
+    let mut batch_options = serde_json::Map::new();
+    batch_options.insert("files".to_string(), serde_json::Value::Array(
         files.iter().map(|f| serde_json::Value::String(f.clone())).collect()
     ));
-    options.insert("output_dir".to_string(), serde_json::Value::String(destination.clone()));
+    batch_options.insert("output_dir".to_string(), serde_json::Value::String(destination.clone()));
+
+    // Add OCR configuration options if provided
+    if let Some(ocr_opts) = options {
+        if let Some(obj) = ocr_opts.as_object() {
+            for (key, value) in obj {
+                batch_options.insert(key.clone(), value.clone());
+            }
+        }
+    }
 
     // Send batch command
     let command = PythonCommand {
         command: "ocr_batch".to_string(),
         file_path: None,
-        options: Some(serde_json::Value::Object(options)),
+        options: Some(serde_json::Value::Object(batch_options)),
     };
 
     {
