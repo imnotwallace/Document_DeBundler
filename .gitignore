@@ -66,16 +66,19 @@ docs/HANDOFF_*.md
 # OCR Models (auto-downloaded or user-provided)
 # Keep directory structure but ignore model files
 python-backend/models/det/*.pdiparams
+python-backend/models/det/*.pdiparams.info
 python-backend/models/det/*.pdmodel
 python-backend/models/det/*.pdopt
 python-backend/models/det/*.yml
 python-backend/models/det/*.json
 python-backend/models/rec/*.pdiparams
+python-backend/models/rec/*.pdiparams.info
 python-backend/models/rec/*.pdmodel
 python-backend/models/rec/*.pdopt
 python-backend/models/rec/*.yml
 python-backend/models/rec/*.json
 python-backend/models/cls/*.pdiparams
+python-backend/models/cls/*.pdiparams.info
 python-backend/models/cls/*.pdmodel
 python-backend/models/cls/*.pdopt
 python-backend/models/cls/*.yml
