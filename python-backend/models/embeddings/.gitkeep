@@ -1,0 +1,2 @@
+# This file ensures the embeddings directory is tracked by git
+# Model files will be downloaded here but are gitignored
