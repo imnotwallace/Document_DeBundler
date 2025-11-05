@@ -108,3 +108,52 @@ python-backend/bin/llama-cpp/
 # AI coder context
 .ai-coder-context/
 .serena/
+.ai-code-review/
+
+# Test and diagnostic scripts (python-backend root)
+python-backend/test_*.py
+python-backend/diagnose_*.py
+python-backend/analyze_*.py
+python-backend/check_*.py
+python-backend/debug_*.py
+
+# Experimental/WIP service files
+python-backend/services/ocr/adaptive_batch_per_page.py
+python-backend/services/ocr/adaptive_max_side_limit.py
+python-backend/services/ocr/coordinate_mapper.py
+python-backend/services/ocr/engine_pool.py
+python-backend/services/ocr/max_side_limit.py
+python-backend/services/ocr/max_side_limit_patch.py
+python-backend/services/ocr/preprocessing.py
+python-backend/services/pdf_text_layer_analyzer.py
+
+# WIP test files
+python-backend/tests/test_engine_pooling.py
+python-backend/tests/test_ocr_text_loss.py
+
+# OCR output and analysis files
+python-backend/*_output*.txt
+python-backend/*_results*.txt
+python-backend/installed.txt
+python-backend/required.txt
+
+# Development documentation in python-backend
+python-backend/*_SOLUTION*.md
+python-backend/*_HANDLING*.md
+python-backend/*_SUMMARY*.md
+
+# Config directory (if temporary)
+python-backend/config/
+
+# Testing outputs
+testing_output/
+
+# Backup files
+src/App-backup.svelte
+*.backup.*
+
+# Vite temp files
+vite.config.ts.timestamp-*
+
+# Python temp files
+*.py.tmp.*
