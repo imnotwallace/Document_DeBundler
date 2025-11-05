@@ -276,6 +276,7 @@ pub async fn start_processing(
 pub async fn start_batch_ocr(
     files: Vec<String>,
     destination: String,
+    ocr_config: Option<serde_json::Value>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -338,6 +339,11 @@ pub async fn start_batch_ocr(
         files.iter().map(|f| serde_json::Value::String(f.clone())).collect()
     ));
     options.insert("output_dir".to_string(), serde_json::Value::String(destination.clone()));
+
+    // Add OCR configuration if provided
+    if let Some(config) = ocr_config {
+        options.insert("ocr_config".to_string(), config);
+    }
 
     // Send batch command
     let command = PythonCommand {
@@ -476,5 +482,87 @@ fn get_python_script_path(_app: &tauri::AppHandle) -> Result<String, String> {
         }
 
         Ok(resource_path.to_string_lossy().to_string())
+    }
+}
+
+/// Get hardware capabilities for OCR configuration
+#[tauri::command]
+pub async fn get_hardware_capabilities(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }
+
+    // Start event loop
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Send hardware capabilities command
+    let command = PythonCommand {
+        command: "get_hardware_capabilities".to_string(),
+        file_path: None,
+        options: None,
+    };
+
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.send_command(command)?;
+    }
+
+    // Wait for result with timeout (10 seconds)
+    let result = timeout(Duration::from_secs(10), async {
+        loop {
+            let event = {
+                let process = state.python_process.lock()
+                    .map_err(|e| format!("Failed to lock process: {}", e))?;
+                process.read_event()?
+            };
+
+            if let Some(evt) = event {
+                match evt.event_type.as_str() {
+                    "result" => {
+                        // Return the hardware capabilities data directly
+                        return Ok(serde_json::json!(evt.data));
+                    }
+                    "error" => {
+                        let msg = evt.data.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown error");
+                        return Err(format!("Python error: {}", msg));
+                    }
+                    _ => {
+                        // Ignore other events
+                        continue;
+                    }
+                }
+            }
+
+            // Small delay to prevent busy waiting
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await;
+
+    match result {
+        Ok(Ok(capabilities)) => Ok(capabilities),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Timeout waiting for hardware capabilities".to_string()),
     }
 }

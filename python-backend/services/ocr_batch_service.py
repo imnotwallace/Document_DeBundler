@@ -114,7 +114,8 @@ class OCRBatchService:
         progress_callback: Optional[Callable[[int, int, str, float, float], None]] = None,
         cancellation_flag: Optional[threading.Event] = None,
         use_gpu: bool = True,
-        config: Optional[OCRProcessingConfig] = None
+        config: Optional[OCRProcessingConfig] = None,
+        ocr_config: Optional[dict] = None
     ):
         """
         Initialize OCR batch service.
@@ -128,12 +129,21 @@ class OCRBatchService:
                 - eta: Estimated time remaining in seconds
             cancellation_flag: threading.Event for cancellation signaling
             use_gpu: Whether to use GPU acceleration if available
-            config: OCR processing configuration (uses defaults if not provided)
+            config: OCR processing configuration object (uses defaults if not provided)
+            ocr_config: Raw OCR configuration dictionary from frontend (converted to OCRProcessingConfig)
         """
         self.progress_callback = progress_callback
         self.cancellation_flag = cancellation_flag
-        self.use_gpu = use_gpu
-        self.config = config or OCRProcessingConfig()
+
+        # Handle ocr_config from frontend - convert dict to OCRProcessingConfig
+        if ocr_config:
+            logger.info("Converting frontend OCR config to OCRProcessingConfig")
+            self.config = self._convert_frontend_config(ocr_config)
+            # Override use_gpu if specified in config
+            self.use_gpu = ocr_config.get('use_gpu', use_gpu)
+        else:
+            self.use_gpu = use_gpu
+            self.config = config or OCRProcessingConfig()
 
         # Services (lazy initialized)
         self.ocr_service: Optional[OCRService] = None
@@ -159,6 +169,59 @@ class OCRBatchService:
             f"mode={self.config.processing_mode}, "
             f"coordinate_mapping={self.config.use_coordinate_mapping}"
         )
+
+    def _convert_frontend_config(self, ocr_config: dict) -> OCRProcessingConfig:
+        """
+        Convert frontend OCR configuration dictionary to OCRProcessingConfig.
+
+        Frontend config includes:
+        - use_gpu, dpi, languages, batch_size: OCR engine settings
+        - processing_mode: Maps to OCRProcessingConfig
+        - confidence_threshold: Maps to min_quality_threshold
+
+        Args:
+            ocr_config: Dictionary from frontend with OCR settings
+
+        Returns:
+            OCRProcessingConfig object with mapped settings
+        """
+        config = OCRProcessingConfig()
+
+        # Map processing mode (hybrid/selective/full)
+        if 'processing_mode' in ocr_config:
+            config.processing_mode = ocr_config['processing_mode']
+            logger.info(f"Using processing mode: {config.processing_mode}")
+
+        # Map confidence threshold to quality threshold
+        if 'confidence_threshold' in ocr_config:
+            config.min_quality_threshold = ocr_config['confidence_threshold']
+            logger.info(f"Min quality threshold: {config.min_quality_threshold}")
+
+        # Enable coordinate mapping by default (can be disabled in frontend config)
+        if 'use_coordinate_mapping' in ocr_config:
+            config.use_coordinate_mapping = ocr_config['use_coordinate_mapping']
+
+        # Note: DPI, languages, and other OCR engine settings are stored separately
+        # and will be passed to OCRService initialization
+        # Store them in instance variables for later use
+        if 'dpi' in ocr_config:
+            self.override_dpi = ocr_config['dpi']
+            logger.info(f"DPI override: {self.override_dpi}")
+        else:
+            self.override_dpi = None
+
+        if 'languages' in ocr_config:
+            self.override_languages = ocr_config['languages']
+            logger.info(f"Language override: {self.override_languages}")
+        else:
+            self.override_languages = None
+
+        if 'batch_size' in ocr_config:
+            # Override the auto-detected batch size
+            self.batch_size = ocr_config['batch_size']
+            logger.info(f"Batch size override: {self.batch_size}")
+
+        return config
 
     def _detect_batch_size(self) -> int:
         """

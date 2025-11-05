@@ -8,6 +8,18 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      // Exclude Python virtual environment and build artifacts from file watching
+      ignored: [
+        '**/python-backend/.venv/**',
+        '**/python-backend/**/*.pyc',
+        '**/python-backend/**/__pycache__/**',
+        '**/src-tauri/target/**',
+        '**/.git/**'
+      ],
+      // Use polling on Windows to avoid filesystem watcher issues
+      usePolling: false
+    }
   },
   envPrefix: ['VITE_', 'TAURI_'],
   build: {

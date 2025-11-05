@@ -1,6 +1,14 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/tauri';
+  import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+
+  interface LLMStatus {
+    available: boolean;
+    initialized: boolean;
+    model_name?: string;
+    gpu_enabled: boolean;
+    expected_vram_gb?: number;
+  }
 
   let llmAvailable = false;
   let llmInitialized = false;
@@ -11,7 +19,7 @@
   async function checkLLMStatus() {
     try {
       // Call Rust command to check LLM status via Python
-      const status = await invoke('get_llm_status');
+      const status = await invoke<LLMStatus>('get_llm_status');
       llmAvailable = status.available;
       llmInitialized = status.initialized;
       modelName = status.model_name || 'Not loaded';

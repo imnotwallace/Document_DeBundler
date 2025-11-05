@@ -46,6 +46,101 @@ def get_gpu_memory_gb() -> float:
     return 0.0
 
 
+def get_gpu_memory_gb_directml() -> float:
+    """Get GPU memory via DirectML (Windows AMD/Intel/NVIDIA GPUs)"""
+    if platform.system() != "Windows":
+        return 0.0
+    
+    try:
+        import torch_directml
+        # DirectML doesn't expose memory directly, try WMI if available
+        try:
+            import wmi
+            computer = wmi.WMI()
+            for gpu in computer.Win32_VideoController():
+                if gpu.AdapterRAM:
+                    # AdapterRAM is in bytes
+                    memory_gb = gpu.AdapterRAM / (1024 ** 3)
+                    if memory_gb > 0.5:  # Filter out virtual/integrated GPUs with minimal memory
+                        return memory_gb
+        except ImportError:
+            # WMI not installed, that's okay
+            pass
+    except:
+        pass
+    
+    return 0.0
+
+
+def get_gpu_memory_gb_wmi() -> float:
+    """Get GPU memory via WMI (Windows fallback)"""
+    if platform.system() != "Windows":
+        return 0.0
+    
+    try:
+        import wmi
+        computer = wmi.WMI()
+        for gpu in computer.Win32_VideoController():
+            if gpu.AdapterRAM:
+                memory_gb = gpu.AdapterRAM / (1024 ** 3)
+                if memory_gb > 0.5:  # Filter out virtual/integrated GPUs
+                    return memory_gb
+    except:
+        pass
+    
+    return 0.0
+
+
+def get_gpu_memory_gb_nvidia_smi() -> float:
+    """Get GPU memory via nvidia-smi command (Linux/Windows NVIDIA fallback)"""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            # Output is in MiB
+            memory_mib = float(result.stdout.strip().split('\n')[0])
+            return memory_mib / 1024  # Convert to GB
+    except:
+        pass
+    
+    return 0.0
+
+
+def get_gpu_memory_gb_all_methods() -> float:
+    """Try all methods to detect GPU memory, return first successful result"""
+    # Try CUDA first (most accurate for NVIDIA)
+    memory = get_gpu_memory_gb()
+    if memory > 0:
+        logger.info(f"Detected {memory:.2f}GB GPU memory via CUDA")
+        return memory
+    
+    # Try DirectML/WMI for Windows
+    if platform.system() == "Windows":
+        memory = get_gpu_memory_gb_directml()
+        if memory > 0:
+            logger.info(f"Detected {memory:.2f}GB GPU memory via DirectML/WMI")
+            return memory
+        
+        memory = get_gpu_memory_gb_wmi()
+        if memory > 0:
+            logger.info(f"Detected {memory:.2f}GB GPU memory via WMI")
+            return memory
+    
+    # Try nvidia-smi as last resort
+    memory = get_gpu_memory_gb_nvidia_smi()
+    if memory > 0:
+        logger.info(f"Detected {memory:.2f}GB GPU memory via nvidia-smi")
+        return memory
+    
+    logger.warning("Could not detect GPU memory via any method")
+    return 0.0
+
+
 def get_system_memory_gb() -> float:
     """Get total system memory in GB"""
     return psutil.virtual_memory().total / (1024 ** 3)
@@ -145,7 +240,8 @@ def detect_hardware_capabilities() -> Dict[str, Any]:
     directml_available = detect_gpu_directml()
     gpu_available = cuda_available or directml_available
 
-    gpu_memory = get_gpu_memory_gb() if cuda_available else 0.0
+    # Use comprehensive GPU memory detection
+    gpu_memory = get_gpu_memory_gb_all_methods() if gpu_available else 0.0
     system_memory = get_system_memory_gb()
 
     capabilities = {
