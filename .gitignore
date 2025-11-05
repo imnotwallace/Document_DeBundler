@@ -160,3 +160,4 @@ vite.config.ts.timestamp-*
 
 # Python temp files
 *.py.tmp.*
+.claude/settings.local.json
