@@ -19,6 +19,7 @@ from .pdf_processor import PDFProcessor
 from .ocr.config import detect_hardware_capabilities, get_optimal_batch_size
 from .ocr.vram_monitor import VRAMMonitor
 from .ocr.base import OCRResult
+from .ocr.intelligent_preprocessing import IntelligentPreprocessor
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,13 @@ class OCRProcessingConfig:
     # Coordinate mapping
     use_coordinate_mapping: bool = True  # Position text using OCR bounding boxes
     
+    # Intelligent preprocessing (NEW)
+    enable_intelligent_preprocessing: bool = True  # Auto-optimize images for OCR
+    preprocessing_allow_destructive: bool = True  # Allow binarization/morphological ops
+    preprocessing_enable_validation: bool = True  # Validate quality improvements
+    preprocessing_min_quality_improvement: float = 4.0  # Minimum improvement to use preprocessed (tuned for photo documents)
+    preprocessing_min_ssim: float = 0.85  # Minimum structural similarity threshold
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary"""
         return {
@@ -82,6 +90,11 @@ class OCRProcessingConfig:
             'enable_compression': self.enable_compression,
             'processing_mode': self.processing_mode,
             'use_coordinate_mapping': self.use_coordinate_mapping,
+            'enable_intelligent_preprocessing': self.enable_intelligent_preprocessing,
+            'preprocessing_allow_destructive': self.preprocessing_allow_destructive,
+            'preprocessing_enable_validation': self.preprocessing_enable_validation,
+            'preprocessing_min_quality_improvement': self.preprocessing_min_quality_improvement,
+            'preprocessing_min_ssim': self.preprocessing_min_ssim,
         }
 
 
@@ -148,6 +161,7 @@ class OCRBatchService:
         # Services (lazy initialized)
         self.ocr_service: Optional[OCRService] = None
         self.vram_monitor: Optional[VRAMMonitor] = None
+        self.preprocessor: Optional[IntelligentPreprocessor] = None
 
         # Hardware detection
         self.capabilities = detect_hardware_capabilities()
@@ -269,6 +283,15 @@ class OCRBatchService:
         if self.vram_monitor is None and self.use_gpu and self.capabilities['gpu_available']:
             logger.info("Initializing VRAM monitor...")
             self.vram_monitor = VRAMMonitor(check_interval=1.0)
+
+        if self.preprocessor is None and self.config.enable_intelligent_preprocessing:
+            logger.info("Initializing intelligent preprocessor...")
+            self.preprocessor = IntelligentPreprocessor(
+                allow_destructive=self.config.preprocessing_allow_destructive,
+                enable_validation=self.config.preprocessing_enable_validation,
+                min_quality_improvement=self.config.preprocessing_min_quality_improvement,
+                min_ssim=self.config.preprocessing_min_ssim
+            )
 
     def _is_cancelled(self) -> bool:
         """Check if processing has been cancelled"""
@@ -918,6 +941,20 @@ class OCRBatchService:
             for page_num in page_numbers:
                 image = pdf.render_page_to_image(page_num, dpi=300)
                 images.append(image)
+
+            # Apply intelligent preprocessing if enabled
+            if self.preprocessor is not None:
+                logger.debug(f"Applying intelligent preprocessing to {len(images)} images")
+                preprocessed_images = []
+                for idx, img in enumerate(images):
+                    result = self.preprocessor.process(img)
+                    preprocessed_images.append(result.image)
+                    if result.used_preprocessed:
+                        logger.debug(
+                            f"Page {page_numbers[idx]+1}: Applied preprocessing - "
+                            f"{result.techniques_applied}"
+                        )
+                images = preprocessed_images
 
             # Process with OCR - get full results with bounding boxes
             ocr_results = self.ocr_service.process_batch_with_boxes(images)
