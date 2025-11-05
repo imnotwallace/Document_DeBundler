@@ -239,3 +239,7 @@ class TesseractEngine(OCREngine):
     def supports_gpu(self) -> bool:
         """Tesseract does not support GPU"""
         return False
+
+    def is_available(self) -> bool:
+        """Check if Tesseract engine is available and ready to process"""
+        return self._initialized and self.tesseract_available

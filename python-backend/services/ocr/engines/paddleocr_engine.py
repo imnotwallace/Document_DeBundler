@@ -8,6 +8,11 @@ High-performance OCR with GPU support
 from ..cuda_path_fix import add_cuda_dlls_to_path
 add_cuda_dlls_to_path()
 
+# IMPORTANT: Apply max_side_limit patch BEFORE PaddleOCR imports
+# This overrides the default 4000px limit to support high-DPI scans
+from ..max_side_limit_patch import apply_max_side_limit_patch
+apply_max_side_limit_patch()  # Auto-detects GPU/CPU memory and sets appropriate limit
+
 import logging
 import time
 import gc
@@ -56,12 +61,13 @@ class PaddleOCREngine(OCREngine):
             lang = self.config.languages[0] if self.config.languages else 'en'
 
             # Initialize PaddleOCR with 3.x API
-            # Note: PaddleOCR 3.x uses 'device' instead of 'use_gpu'
+            # PaddleOCR 3.3.1 initialization parameters
             ocr_kwargs = {
-                'use_angle_cls': self.config.enable_angle_classification,
                 'lang': lang,
+                'use_textline_orientation': self.config.enable_angle_classification,
+                'text_det_limit_side_len': 18000,      # Support ultra-high-DPI scans (up to 1600 DPI on letter-size pages)
+                'text_det_limit_type': 'max',          # Specify max dimension behavior
                 'device': 'gpu' if use_gpu else 'cpu',
-                'text_det_limit_side_len': 8000,  # Support large images (up to 8000px) for high-DPI scans
             }
 
             # If models are bundled, point to model directory
@@ -104,14 +110,25 @@ class PaddleOCREngine(OCREngine):
             else:
                 logger.info(f"Model directory does not exist or not configured: {self.config.model_dir}")
 
-            # Apply engine-specific settings
+            # Add improved default parameters for better OCR quality (PaddleOCR 3.x API)
+            # These prevent text fragmentation and improve character recognition
+            default_params = {
+                'text_det_box_thresh': 0.4,      # More sensitive text detection (default: 0.6)
+                'text_det_unclip_ratio': 2.0,    # Prevent character fragmentation (default: 1.5)
+                'text_rec_score_thresh': 0.4,    # Keep more low-confidence results (default: 0.5)
+            }
+            ocr_kwargs.update(default_params)
+            
+            # Apply engine-specific settings (overrides defaults)
             ocr_kwargs.update(self.config.engine_settings)
 
             # Create OCR instance
             logger.info(f"Creating PaddleOCR instance with kwargs: {ocr_kwargs}")
             logger.info("This may take 30-60 seconds on first run...")
+
             self.ocr = PaddleOCR(**ocr_kwargs)
             logger.info("PaddleOCR instance created successfully")
+
             self._gpu_available = use_gpu
             self._initialized = True
 
@@ -136,6 +153,60 @@ class PaddleOCREngine(OCREngine):
             logger.error(f"Failed to initialize PaddleOCR: {e}", exc_info=True)
             raise
 
+    def warmup(self, dummy_image: Optional[np.ndarray] = None) -> float:
+        """
+        Warm up the OCR engine by running a dummy inference.
+
+        This pre-compiles CUDA kernels and caches the inference engine,
+        making subsequent real operations much faster (typically 5-10s → <1s).
+
+        Args:
+            dummy_image: Optional dummy image for warmup. If None, creates a small test image.
+
+        Returns:
+            Warmup time in seconds
+
+        Example:
+            engine = PaddleOCREngine(config)
+            engine.initialize()
+            warmup_time = engine.warmup()
+            # Now real operations are much faster
+        """
+        if not self._initialized:
+            raise RuntimeError("Cannot warm up: OCR engine not initialized")
+
+        logger.info("Warming up PaddleOCR engine (pre-compiling CUDA kernels)...")
+        start_time = time.time()
+
+        try:
+            # Create small dummy image if not provided
+            if dummy_image is None:
+                # 100x100 white image with black text-like features
+                dummy_image = np.ones((100, 100, 3), dtype=np.uint8) * 255
+                # Add some text-like features (black rectangles simulating text)
+                dummy_image[40:45, 20:80] = 0  # Horizontal line (text-like)
+                dummy_image[55:60, 20:80] = 0  # Another line
+
+            # Run dummy inference to trigger compilation
+            _ = self.process_image(dummy_image)
+
+            warmup_time = time.time() - start_time
+            logger.info(
+                f"PaddleOCR engine warmed up in {warmup_time:.2f}s "
+                f"(CUDA kernels compiled, subsequent operations will be faster)"
+            )
+
+            return warmup_time
+
+        except Exception as e:
+            warmup_time = time.time() - start_time
+            logger.warning(
+                f"Warmup failed after {warmup_time:.2f}s: {e}. "
+                f"Engine will still work but first operation may be slower."
+            )
+            # Don't raise - warmup failure shouldn't block actual operations
+            return warmup_time
+
     def _check_gpu_available(self) -> bool:
         """Check if GPU is available for PaddlePaddle"""
         try:
@@ -157,16 +228,34 @@ class PaddleOCREngine(OCREngine):
         if not self._initialized:
             raise RuntimeError("OCR engine not initialized")
 
+        # Log input dimensions for debugging
+        logger.debug(f"[PaddleOCR] Input image shape: {image.shape} (H={image.shape[0]}, W={image.shape[1]})")
+
         start_time = time.time()
 
         try:
             # Run OCR using Paddle 3.x predict() API
             result = self.ocr.predict(image)
             
+            # CRITICAL DEBUG: Log what PaddleOCR actually returns
+            logger.info(f"PaddleOCR predict() returned: type={type(result)}, value={result}")
+            
             # Extract text and confidence from Paddle 3.x format
             text_lines = []
             confidences = []
             bboxes = []
+            
+            # Handle unexpected result types
+            if result == 0 or result is None:
+                logger.warning(f"PaddleOCR returned ZERO or None - no text detected in image")
+                # Return empty result WITHOUT raw_result to avoid downstream parsing errors
+                return OCRResult(
+                    text="",
+                    confidence=0.0,
+                    error="PaddleOCR returned 0 (no text detected)",
+                    raw_result=None,  # Explicitly set to None, NOT 0
+                    processing_time=time.time() - start_time
+                )
             
             if result and len(result) > 0:
                 # Paddle 3.x returns list with dict containing 'rec_texts', 'rec_scores', 'rec_polys'
@@ -355,3 +444,7 @@ class PaddleOCREngine(OCREngine):
     def supports_gpu(self) -> bool:
         """Check if GPU is supported and available"""
         return self._gpu_available
+
+    def is_available(self) -> bool:
+        """Check if PaddleOCR engine is available and ready to process"""
+        return self._initialized and self.ocr is not None

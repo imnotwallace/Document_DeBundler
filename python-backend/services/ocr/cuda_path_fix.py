@@ -46,6 +46,12 @@ def add_cuda_dlls_to_path():
             try:
                 # Dynamically import the package
                 package = __import__(package_name, fromlist=[''])
+                
+                # Skip if package has no __file__ (namespace packages)
+                if package.__file__ is None:
+                    logger.debug(f"{package_name} has no __file__ (namespace package), skipping")
+                    continue
+                
                 package_base = Path(package.__file__).parent
 
                 # Check common locations for DLLs

@@ -58,6 +58,10 @@ class OCRConfig:
     # Engine-specific settings
     engine_settings: Dict[str, Any] = field(default_factory=dict)
 
+    # Engine pooling settings
+    enable_engine_pooling: bool = True  # Reuse engines across operations (massive performance improvement)
+    enable_warmup: bool = True  # Warm up engines after initialization (faster first operation)
+
     # Logging
     verbose: bool = False
 
@@ -128,6 +132,19 @@ class OCREngine(ABC):
 
         Returns:
             True if GPU is supported and available
+        """
+        pass
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """
+        Check if the OCR engine is available and ready to process.
+        
+        This method should verify that the engine is properly initialized
+        and all required resources are loaded and accessible.
+        
+        Returns:
+            True if engine is initialized and ready to process images, False otherwise
         """
         pass
 

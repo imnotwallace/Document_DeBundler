@@ -298,6 +298,9 @@ class TextLayerValidator:
         """
         Calculate confidence that text layer coverage is adequate.
         
+        Updated to be more lenient with sparse documents (receipts, forms, invoices)
+        that naturally have low text coverage but are still valid.
+        
         Args:
             text_coverage_ratio: Fraction of page covered by text bboxes
             has_images: Whether page contains images
@@ -309,26 +312,39 @@ class TextLayerValidator:
             Confidence score 0-1 (1 = high confidence coverage is good)
         """
         # Base confidence on text coverage ratio
-        if text_coverage_ratio >= 0.8:
-            confidence = 1.0
-        elif text_coverage_ratio >= 0.6:
-            confidence = 0.9
+        # Lowered thresholds to support sparse but valid documents (receipts, forms)
+        if text_coverage_ratio >= 0.6:
+            confidence = 1.0  # Good coverage
         elif text_coverage_ratio >= 0.4:
-            confidence = 0.7
+            confidence = 0.95  # Moderate coverage (receipts often in this range)
         elif text_coverage_ratio >= 0.2:
-            confidence = 0.4
+            confidence = 0.85  # Low but acceptable (forms, invoices)
+        elif text_coverage_ratio >= 0.1:
+            confidence = 0.7  # Very sparse but could be valid (single-line receipts)
+        elif text_coverage_ratio >= 0.05:
+            confidence = 0.5  # Minimal coverage (borderline)
         else:
-            confidence = 0.2
+            confidence = 0.2  # Almost no coverage (likely problem)
         
-        # Penalize large uncovered areas if images/drawings present
-        # This catches cases where header has text but scanned body doesn't
-        if (has_images or has_drawings) and uncovered_area_ratio > 0.3:
-            # Likely scanned document with partial OCR text layer
-            confidence *= 0.5
-        
-        # Penalize very few text blocks (likely incomplete OCR)
-        if text_blocks_count < 3 and text_coverage_ratio < 0.5:
+        # Only penalize large uncovered areas if BOTH images AND drawings present
+        # This catches scanned docs with partial OCR, but allows sparse text-only docs
+        if has_images and has_drawings and uncovered_area_ratio > 0.5:
+            # Likely scanned document with partial OCR text layer (header only)
             confidence *= 0.6
+            logger.debug(
+                f"Coverage penalty applied: has images & drawings with "
+                f"{uncovered_area_ratio:.1%} uncovered"
+            )
+        
+        # Only penalize very few text blocks if coverage is also very low
+        # Don't penalize sparse documents with compact but complete information
+        if text_blocks_count < 2 and text_coverage_ratio < 0.1:
+            # Less than 2 blocks AND less than 10% coverage = likely incomplete
+            confidence *= 0.7
+            logger.debug(
+                f"Block count penalty: {text_blocks_count} blocks, "
+                f"{text_coverage_ratio:.1%} coverage"
+            )
         
         return max(0.0, min(1.0, confidence))
 

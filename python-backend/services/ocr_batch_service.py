@@ -18,6 +18,7 @@ from .ocr_service import OCRService
 from .pdf_processor import PDFProcessor
 from .ocr.config import detect_hardware_capabilities, get_optimal_batch_size
 from .ocr.vram_monitor import VRAMMonitor
+from .ocr.base import OCRResult
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,41 @@ class ProcessingStats:
         }
 
 
+@dataclass
+class OCRProcessingConfig:
+    """Configuration for OCR processing behavior and quality thresholds"""
+    
+    # Quality validation thresholds
+    min_alphanumeric_ratio: float = 0.10  # Lowered from 0.15 to support symbol-heavy content (receipts, forms, separators)
+    min_quality_improvement_margin: float = 0.02  # Lowered from 0.05 for more sensitive comparison
+    min_quality_threshold: float = 0.70  # Threshold for "good enough" quality
+    
+    # Size optimization
+    image_compression_quality: int = 85  # JPEG quality for scanned pages (0-100)
+    enable_compression: bool = True  # Apply compression to images
+    
+    # Processing modes
+    processing_mode: str = "hybrid"  # "hybrid", "selective", "full"
+    # - hybrid: Analyze each page, only OCR what needs improvement
+    # - selective: Only OCR pages with no text layer
+    # - full: OCR all pages regardless
+    
+    # Coordinate mapping
+    use_coordinate_mapping: bool = True  # Position text using OCR bounding boxes
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary"""
+        return {
+            'min_alphanumeric_ratio': self.min_alphanumeric_ratio,
+            'min_quality_improvement_margin': self.min_quality_improvement_margin,
+            'min_quality_threshold': self.min_quality_threshold,
+            'image_compression_quality': self.image_compression_quality,
+            'enable_compression': self.enable_compression,
+            'processing_mode': self.processing_mode,
+            'use_coordinate_mapping': self.use_coordinate_mapping,
+        }
+
+
 class OCRBatchService:
     """
     Production-ready OCR batch processing service.
@@ -77,7 +113,8 @@ class OCRBatchService:
         self,
         progress_callback: Optional[Callable[[int, int, str, float, float], None]] = None,
         cancellation_flag: Optional[threading.Event] = None,
-        use_gpu: bool = True
+        use_gpu: bool = True,
+        config: Optional[OCRProcessingConfig] = None
     ):
         """
         Initialize OCR batch service.
@@ -91,10 +128,12 @@ class OCRBatchService:
                 - eta: Estimated time remaining in seconds
             cancellation_flag: threading.Event for cancellation signaling
             use_gpu: Whether to use GPU acceleration if available
+            config: OCR processing configuration (uses defaults if not provided)
         """
         self.progress_callback = progress_callback
         self.cancellation_flag = cancellation_flag
         self.use_gpu = use_gpu
+        self.config = config or OCRProcessingConfig()
 
         # Services (lazy initialized)
         self.ocr_service: Optional[OCRService] = None
@@ -116,7 +155,9 @@ class OCRBatchService:
             f"GPU={self.use_gpu and self.capabilities['gpu_available']}, "
             f"batch_size={self.batch_size}, "
             f"VRAM={self.capabilities['gpu_memory_gb']:.1f}GB, "
-            f"RAM={self.capabilities['system_memory_gb']:.1f}GB"
+            f"RAM={self.capabilities['system_memory_gb']:.1f}GB, "
+            f"mode={self.config.processing_mode}, "
+            f"coordinate_mapping={self.config.use_coordinate_mapping}"
         )
 
     def _detect_batch_size(self) -> int:
@@ -140,15 +181,19 @@ class OCRBatchService:
     def _initialize_services(self) -> None:
         """Initialize OCR service and VRAM monitor (lazy initialization)"""
         if self.ocr_service is None:
-            logger.info("Initializing OCR service...")
+            logger.info("Initializing OCR service with engine pooling...")
             self.ocr_service = OCRService(
                 gpu=self.use_gpu,
                 engine="paddleocr",  # Use PaddleOCR as primary
-                fallback_enabled=True
+                fallback_enabled=True,
+                use_pooling=True  # Enable engine pooling for reuse
             )
 
             if not self.ocr_service.is_available():
                 raise RuntimeError("Failed to initialize OCR service")
+            
+            # Start batch session (keeps engines alive for reuse)
+            self.ocr_service.start_session()
 
             # Log engine info
             engine_info = self.ocr_service.get_engine_info()
@@ -282,11 +327,19 @@ class OCRBatchService:
         alphanumeric_count = sum(c.isalnum() for c in text)
         alphanumeric_ratio = alphanumeric_count / len(text) if len(text) > 0 else 0
 
-        if alphanumeric_ratio < 0.30:  # Less than 30% alphanumeric = likely garbage
+        # Use configurable threshold (lowered from 0.30 to support receipts/forms with special chars)
+        if alphanumeric_ratio < self.config.min_alphanumeric_ratio:
+            logger.debug(
+                f"Page {page_num}: Alphanumeric ratio {alphanumeric_ratio:.1%} below threshold "
+                f"{self.config.min_alphanumeric_ratio:.1%}"
+            )
             return False, f"Low alphanumeric ratio ({alphanumeric_ratio:.1%})"
 
         # Check for common OCR failure patterns
-        if text.strip() in ['|||||||', '###', '...', '---']:
+        # Only reject if ENTIRE text is garbage AND text is very short
+        # This prevents rejecting legitimate content like "--- Page 5 of 10 ---"
+        stripped_text = text.strip()
+        if len(stripped_text) < 10 and stripped_text in ['|||||||', '###', '......', '------', '||||', '####']:
             return False, "OCR failure pattern detected"
 
         return True, "Valid OCR output"
@@ -301,6 +354,8 @@ class OCRBatchService:
         """
         Process single page with specific OCR engine and DPI.
 
+        Now uses engine pooling to avoid redundant initialization.
+
         Args:
             pdf: PDFProcessor instance
             page_num: Page number
@@ -310,20 +365,20 @@ class OCRBatchService:
         Returns:
             Extracted text
         """
-        # Create temporary OCR service with specific engine
-        temp_ocr = OCRService(
-            gpu=self.use_gpu,
-            engine=engine,
-            fallback_enabled=False
-        )
+        # Switch to requested engine using pooling (no re-initialization!)
+        if self.ocr_service.engine_name != engine:
+            logger.info(f"Switching from {self.ocr_service.engine_name} to {engine}")
+            self.ocr_service.switch_engine(engine)
 
         try:
+            # Render at requested DPI
             image = pdf.render_page_to_image(page_num, dpi=dpi)
-            text = temp_ocr.extract_text_from_array(image)
+            text = self.ocr_service.extract_text_from_array(image)
             del image
             return text
-        finally:
-            temp_ocr.cleanup()
+        except Exception as e:
+            logger.error(f"OCR failed with {engine} at {dpi} DPI: {e}")
+            return ""
 
     def _retry_ocr_with_fallback(
         self,
@@ -431,68 +486,109 @@ class OCRBatchService:
             f"Original: {original_score:.2%}, OCR: {ocr_score:.2%}"
         )
 
-        # Decision logic
-        QUALITY_THRESHOLD = 0.70  # Minimum acceptable quality
-        IMPROVEMENT_MARGIN = 0.05  # Require 5% improvement to justify replacement
+        # Use configurable thresholds (lowered from 0.70 and 0.05 for more sensitive comparison)
+        quality_threshold = self.config.min_quality_threshold
+        improvement_margin = self.config.min_quality_improvement_margin
 
-        # If original is already high quality, require significant improvement
-        if original_score >= QUALITY_THRESHOLD:
-            if ocr_score > original_score + IMPROVEMENT_MARGIN:
+        # If original is already high quality, require improvement to justify replacement
+        if original_score >= quality_threshold:
+            if ocr_score > original_score + improvement_margin:
+                logger.info(
+                    f"Page {page_num+1}: Replacing with OCR - quality improved "
+                    f"({original_score:.2%} → {ocr_score:.2%})"
+                )
                 return True, f"OCR improved quality ({original_score:.2%} → {ocr_score:.2%})"
             else:
+                logger.debug(
+                    f"Page {page_num+1}: Keeping original - quality sufficient "
+                    f"({original_score:.2%}), OCR not significantly better ({ocr_score:.2%})"
+                )
                 return False, f"Original quality sufficient ({original_score:.2%}), OCR not better ({ocr_score:.2%})"
 
         # If original is low quality, accept any improvement
         if ocr_score > original_score:
+            logger.info(
+                f"Page {page_num+1}: Replacing with OCR - improved low-quality text "
+                f"({original_score:.2%} → {ocr_score:.2%})"
+            )
             return True, f"OCR improved quality ({original_score:.2%} → {ocr_score:.2%})"
         else:
+            logger.debug(
+                f"Page {page_num+1}: Keeping original - OCR did not improve "
+                f"({original_score:.2%} → {ocr_score:.2%})"
+            )
             return False, f"OCR did not improve quality ({original_score:.2%} → {ocr_score:.2%})"
 
     def _clean_rebuild_page_with_ocr(
         self,
         doc: fitz.Document,
         page_num: int,
-        ocr_text: str
+        ocr_text: str,
+        ocr_result: Optional[object] = None,
+        rebuild_strategy: str = "full"
     ) -> None:
         """
-        Rebuild page cleanly with OCR text layer, removing all existing text.
+        Add OCR text layer to page using specified strategy.
 
-        This prevents text layer duplication by:
-        1. Rendering the page to an image (preserves visual appearance)
-        2. Creating a new blank page
-        3. Inserting the rendered image
-        4. Adding OCR text as invisible overlay
-        5. Replacing the original page
+        Strategies:
+        - "overlay": Add text overlay only, preserve original content (minimal size increase)
+        - "full": Full rebuild with image re-rendering and compression (for scanned pages)
 
         Args:
             doc: PyMuPDF document
-            page_num: Page number to rebuild
+            page_num: Page number to process
             ocr_text: OCR text to embed
+            ocr_result: Optional OCR result with bounding boxes for coordinate mapping
+            rebuild_strategy: "overlay" or "full"
         """
         try:
-            # Get original page
             original_page = doc[page_num]
             page_rect = original_page.rect
 
-            logger.debug(f"Rebuilding page {page_num+1} with clean OCR layer")
+            if rebuild_strategy == "overlay":
+                # Strategy 1: Text overlay only (no re-rendering)
+                # Best for pages with good visual content but poor/no text layer
+                logger.debug(f"Page {page_num+1}: Adding text overlay (no re-render)")
+                self._add_text_overlay(original_page, page_rect, ocr_text, ocr_result)
+                
+            else:
+                # Strategy 2: Full rebuild with compression (for scanned pages)
+                logger.debug(f"Page {page_num+1}: Full rebuild with compression")
+                self._full_rebuild_with_compression(
+                    doc, page_num, original_page, page_rect, ocr_text, ocr_result
+                )
 
-            # Step 1: Render page to high-quality image
-            # This captures ALL visual content (text, images, drawings)
-            # but loses the text layer (which we want)
-            pix = original_page.get_pixmap(dpi=300)
+            logger.debug(f"Page {page_num+1} processed successfully with strategy: {rebuild_strategy}")
 
-            # Step 2: Create new blank page with same dimensions
-            new_page = doc.new_page(
-                width=page_rect.width,
-                height=page_rect.height
-            )
+        except Exception as e:
+            logger.error(f"Failed to process page {page_num+1}: {e}", exc_info=True)
+            raise
 
-            # Step 3: Insert rendered image to preserve visual appearance
-            new_page.insert_image(page_rect, pixmap=pix)
+    def _add_text_overlay(
+        self,
+        page: fitz.Page,
+        page_rect: fitz.Rect,
+        ocr_text: str,
+        ocr_result: Optional[object] = None
+    ) -> None:
+        """
+        Add invisible text overlay to existing page without re-rendering.
 
-            # Step 4: Add OCR text as invisible overlay
-            # This creates searchable text without visible rendering
-            new_page.insert_textbox(
+        Uses coordinate mapping if OCR result has bounding boxes.
+
+        Args:
+            page: PyMuPDF page to add text to
+            page_rect: Page rectangle
+            ocr_text: OCR text to add
+            ocr_result: Optional OCR result with bounding boxes
+        """
+        # Check if we can use coordinate mapping
+        if self.config.use_coordinate_mapping and ocr_result and hasattr(ocr_result, 'bbox') and ocr_result.bbox:
+            # Use positioned text with coordinate mapping
+            self._insert_positioned_text(page, page_rect, ocr_text, ocr_result)
+        else:
+            # Fallback: Single textbox covering entire page
+            page.insert_textbox(
                 page_rect,
                 ocr_text,
                 fontsize=8,
@@ -501,34 +597,231 @@ class OCRBatchService:
                 render_mode=3  # Invisible text mode
             )
 
-            # Step 5: Replace original page with clean rebuilt page
-            # IMPORTANT: Delete original FIRST, then insert new page at same position
-            # This avoids index shifting issues with move_page
-            
-            # Delete the original page first
-            doc.delete_page(page_num)
-            
-            # Now insert the new page at the correct position
-            # (new_page is currently at the end of the document)
-            doc.move_page(doc.page_count - 1, page_num)
-            
-            # Clean up pixmap (explicit deletion for memory management)
-            del pix
-            import gc
-            gc.collect()
+    def _full_rebuild_with_compression(
+        self,
+        doc: fitz.Document,
+        page_num: int,
+        original_page: fitz.Page,
+        page_rect: fitz.Rect,
+        ocr_text: str,
+        ocr_result: Optional[object] = None
+    ) -> None:
+        """
+        Full page rebuild with image compression for scanned pages.
 
-            logger.debug(f"Page {page_num+1} rebuilt successfully")
+        Args:
+            doc: PyMuPDF document
+            page_num: Page number
+            original_page: Original page object
+            page_rect: Page rectangle
+            ocr_text: OCR text
+            ocr_result: Optional OCR result with bounding boxes
+        """
+        # Step 1: Render page to image
+        pix = original_page.get_pixmap(dpi=300)
 
+        # Step 2: Create new blank page
+        new_page = doc.new_page(
+            width=page_rect.width,
+            height=page_rect.height
+        )
+
+        # Step 3: Insert image with compression
+        if self.config.enable_compression:
+            # Convert pixmap to compressed image data
+            import io
+            from PIL import Image
+            
+            # Convert pixmap to PIL Image
+            img_data = pix.tobytes("ppm")
+            pil_img = Image.frombytes("RGB", (pix.width, pix.height), img_data)
+            
+            # Compress as JPEG
+            img_buffer = io.BytesIO()
+            pil_img.save(
+                img_buffer,
+                format='JPEG',
+                quality=self.config.image_compression_quality,
+                optimize=True
+            )
+            img_buffer.seek(0)
+            
+            # Insert compressed image
+            new_page.insert_image(page_rect, stream=img_buffer.getvalue())
+            
+        else:
+            # Insert without compression
+            new_page.insert_image(page_rect, pixmap=pix)
+
+        # Step 4: Add OCR text with coordinate mapping
+        if self.config.use_coordinate_mapping and ocr_result and hasattr(ocr_result, 'bbox') and ocr_result.bbox:
+            self._insert_positioned_text(new_page, page_rect, ocr_text, ocr_result)
+        else:
+            # Fallback: Single textbox
+            new_page.insert_textbox(
+                page_rect,
+                ocr_text,
+                fontsize=8,
+                color=(1, 1, 1),
+                overlay=True,
+                render_mode=3
+            )
+
+        # Step 5: Replace original page
+        doc.delete_page(page_num)
+        doc.move_page(doc.page_count - 1, page_num)
+
+        # Cleanup
+        del pix
+        import gc
+        gc.collect()
+
+    def _insert_positioned_text(
+        self,
+        page: fitz.Page,
+        page_rect: fitz.Rect,
+        ocr_text: str,
+        ocr_result: object
+    ) -> None:
+        """
+        Insert text at precise locations using OCR bounding boxes.
+
+        Args:
+            page: PyMuPDF page
+            page_rect: Page rectangle
+            ocr_text: Full OCR text
+            ocr_result: OCR result with bounding boxes
+        """
+        try:
+            from .ocr.coordinate_mapper import CoordinateMapper
+            
+            mapper = CoordinateMapper()
+            
+            # Get text lines and bounding boxes from OCR result
+            # OCR result format varies by engine, handle both
+            if hasattr(ocr_result, 'raw_result') and ocr_result.raw_result:
+                text_lines, bboxes = self._extract_text_and_boxes_from_ocr(ocr_result.raw_result)
+            elif isinstance(ocr_result.bbox, list) and ocr_result.bbox:
+                # Simple case: single bbox for entire text
+                text_lines = [ocr_text]
+                bboxes = [ocr_result.bbox]
+            else:
+                # Fallback: no bounding boxes available
+                logger.warning(f"No bounding boxes available, falling back to single textbox")
+                page.insert_textbox(
+                    page_rect,
+                    ocr_text,
+                    fontsize=8,
+                    color=(1, 1, 1),
+                    overlay=True,
+                    render_mode=3
+                )
+                return
+            
+            # Get image dimensions (assume 300 DPI rendering)
+            dpi = 300
+            image_width = int(page_rect.width * dpi / 72)
+            image_height = int(page_rect.height * dpi / 72)
+            
+            # Insert each text line at its correct position
+            for text_line, bbox in zip(text_lines, bboxes):
+                if not text_line or not text_line.strip():
+                    continue
+                
+                # Convert bbox to PDF coordinates
+                pdf_bbox = mapper.image_to_pdf_coords(
+                    bbox=bbox,
+                    image_width=image_width,
+                    image_height=image_height,
+                    page_rect=page_rect,
+                    image_dpi=dpi
+                )
+                
+                # Calculate appropriate font size
+                font_size = mapper.calculate_font_size_from_pdf_bbox(pdf_bbox)
+                
+                # Insert text at position
+                try:
+                    page.insert_textbox(
+                        pdf_bbox.to_fitz_rect(),
+                        text_line.strip(),
+                        fontsize=font_size,
+                        color=(1, 1, 1),  # Invisible
+                        overlay=True,
+                        render_mode=3,
+                        align=0  # Left align
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to insert text at position {pdf_bbox}: {e}")
+                    # Continue with other text lines
+                    
+            logger.debug(f"Inserted {len(text_lines)} positioned text elements")
+            
         except Exception as e:
-            logger.error(f"Failed to rebuild page {page_num+1}: {e}", exc_info=True)
-            raise
+            logger.warning(f"Coordinate mapping failed: {e}, falling back to single textbox")
+            # Fallback to simple textbox
+            page.insert_textbox(
+                page_rect,
+                ocr_text,
+                fontsize=8,
+                color=(1, 1, 1),
+                overlay=True,
+                render_mode=3
+            )
+
+    def _extract_text_and_boxes_from_ocr(self, raw_result) -> tuple:
+        """
+        Extract text lines and bounding boxes from raw OCR result.
+
+        Handles PaddleOCR 3.x format.
+
+        Args:
+            raw_result: Raw OCR result from engine
+
+        Returns:
+            Tuple of (text_lines, bboxes) lists
+        """
+        text_lines = []
+        bboxes = []
+        
+        try:
+            # PaddleOCR 3.x format: dict with 'rec_texts', 'rec_scores', 'rec_polys'
+            if isinstance(raw_result, dict):
+                texts = raw_result.get('rec_texts', [])
+                polys = raw_result.get('rec_polys', [])
+                
+                for text, poly in zip(texts, polys):
+                    if text and text.strip():
+                        text_lines.append(text.strip())
+                        # Convert numpy array to list if needed
+                        if hasattr(poly, 'tolist'):
+                            poly = poly.tolist()
+                        bboxes.append(poly)
+                        
+            # PaddleOCR 2.x format: list of [bbox, (text, confidence)]
+            elif isinstance(raw_result, list):
+                for item in raw_result:
+                    if len(item) >= 2:
+                        bbox, (text, score) = item[0], item[1]
+                        if text and text.strip():
+                            text_lines.append(text.strip())
+                            bboxes.append(bbox)
+                            
+        except Exception as e:
+            logger.error(
+                f"Failed to extract text and boxes from raw_result. "
+                f"Exception: {e}, Type: {type(e)}, "
+                f"raw_result type: {type(raw_result)}, raw_result value: {raw_result}"
+            )
+            
+        return text_lines, bboxes
 
     def _process_page_batch(
         self,
         pdf: PDFProcessor,
         page_numbers: List[int],
         file_name: str
-    ) -> List[str]:
+    ) -> List[tuple]:
         """
         Process a batch of PDF pages with OCR and retry logic.
 
@@ -538,7 +831,7 @@ class OCRBatchService:
             file_name: Name of file being processed (for logging)
 
         Returns:
-            List of extracted text for each page
+            List of (text, ocr_result) tuples for each page
         """
         # Check VRAM pressure and adjust batch size if needed
         if self.vram_monitor:
@@ -549,11 +842,11 @@ class OCRBatchService:
                     f"processing pages individually"
                 )
                 # Process one at a time under memory pressure
-                texts = []
+                results = []
                 for page_num in page_numbers:
-                    text = self._process_single_page(pdf, page_num, file_name)
-                    texts.append(text)
-                return texts
+                    text, ocr_result = self._process_single_page(pdf, page_num, file_name)
+                    results.append((text, ocr_result))
+                return results
 
         # Normal batch processing
         def process_batch_operation():
@@ -563,33 +856,36 @@ class OCRBatchService:
                 image = pdf.render_page_to_image(page_num, dpi=300)
                 images.append(image)
 
-            # Process with OCR
-            texts = self.ocr_service.process_batch(images)
+            # Process with OCR - get full results with bounding boxes
+            ocr_results = self.ocr_service.process_batch_with_boxes(images)
 
             # Verify results match input count
-            if len(texts) != len(images):
+            if len(ocr_results) != len(images):
                 logger.error(
                     f"OCR batch result mismatch: expected {len(images)}, "
-                    f"got {len(texts)}"
+                    f"got {len(ocr_results)}"
                 )
-                # Pad with empty strings
-                while len(texts) < len(images):
-                    texts.append("")
+                # Pad with empty results
+                from .ocr.base import OCRResult
+                while len(ocr_results) < len(images):
+                    ocr_results.append(OCRResult(text="", confidence=0.0))
 
             # Cleanup images
             del images
 
-            return texts
+            return ocr_results
 
         # Execute with retry
-        texts = self._retry_with_backoff(
+        ocr_results = self._retry_with_backoff(
             process_batch_operation,
             f"OCR batch ({len(page_numbers)} pages from {file_name})"
         )
 
         # VALIDATE AND RETRY
-        validated_texts = []
-        for idx, (page_num, text) in enumerate(zip(page_numbers, texts)):
+        validated_results = []
+        for idx, (page_num, ocr_result) in enumerate(zip(page_numbers, ocr_results)):
+            text = ocr_result.text
+            
             # DEBUG: Log what OCR extracted before validation
             logger.debug(f"Page {page_num+1}: Raw OCR extracted {len(text)} chars: '{text[:100]}...'")
 
@@ -597,7 +893,7 @@ class OCRBatchService:
             is_valid, reason = self._validate_ocr_output(text, page_num)
 
             if is_valid:
-                validated_texts.append(text)
+                validated_results.append((text, ocr_result))
                 logger.debug(f"Page {page_num+1}: OCR valid ({len(text)} chars) - {reason}")
             else:
                 logger.warning(f"Page {page_num+1}: OCR validation FAILED - {reason} (extracted {len(text)} chars)")
@@ -606,21 +902,30 @@ class OCRBatchService:
                 retry_text, method = self._retry_ocr_with_fallback(pdf, page_num, file_name)
 
                 if retry_text:
-                    validated_texts.append(retry_text)
+                    # Create new OCR result with retry text
+                    from .ocr.base import OCRResult
+                    retry_result = OCRResult(
+                        text=retry_text,
+                        confidence=0.8,  # Assume decent confidence for retry
+                        bbox=None  # No bounding boxes for retry
+                    )
+                    validated_results.append((retry_text, retry_result))
                     logger.info(f"Page {page_num+1}: Retry succeeded with {method}")
                 else:
-                    # All retries failed - use empty text
+                    # All retries failed - use empty result
                     logger.error(f"Page {page_num+1}: All OCR attempts failed")
-                    validated_texts.append("")
+                    from .ocr.base import OCRResult
+                    empty_result = OCRResult(text="", confidence=0.0, error="All OCR attempts failed")
+                    validated_results.append(("", empty_result))
 
-        return validated_texts
+        return validated_results
 
     def _process_single_page(
         self,
         pdf: PDFProcessor,
         page_num: int,
         file_name: str
-    ) -> str:
+    ) -> tuple:
         """
         Process a single page with OCR and retry logic.
 
@@ -630,23 +935,33 @@ class OCRBatchService:
             file_name: Name of file being processed (for logging)
 
         Returns:
-            Extracted text
+            Tuple of (text, ocr_result)
         """
         def process_page_operation():
             image = pdf.render_page_to_image(page_num, dpi=300)
-            text = self.ocr_service.extract_text_from_array(image)
+            # Get full OCR result with bounding boxes
+            ocr_results = self.ocr_service.process_batch_with_boxes([image])
             del image
-            return text
+            return ocr_results[0] if ocr_results else None
 
         try:
-            text = self._retry_with_backoff(
+            ocr_result = self._retry_with_backoff(
                 process_page_operation,
                 f"OCR page {page_num + 1} from {file_name}"
             )
-            return text
+            
+            if ocr_result:
+                return (ocr_result.text, ocr_result)
+            else:
+                from .ocr.base import OCRResult
+                empty_result = OCRResult(text="", confidence=0.0, error="No OCR result")
+                return ("", empty_result)
+                
         except Exception as e:
             logger.error(f"Failed to process page {page_num + 1} after retries: {e}")
-            return ""  # Return empty string on failure
+            from .ocr.base import OCRResult
+            empty_result = OCRResult(text="", confidence=0.0, error=str(e))
+            return ("", empty_result)  # Return empty string on failure
 
     def _process_single_file(
         self,
@@ -717,7 +1032,9 @@ class OCRBatchService:
                     if has_text:
                         # Extract from text layer (fast)
                         text = pdf.extract_text(page_num)
-                        page_texts[page_num] = text
+                        # Store as tuple for consistency with OCR results
+                        dummy_result = OCRResult(text=text, confidence=1.0, bbox=None)
+                        page_texts[page_num] = (text, dummy_result)
                         original_texts[page_num] = text  # Save for quality comparison
                         result['pages_text_layer'] += 1
                         logger.debug(f"Page {page_num + 1}: Using text layer")
@@ -749,17 +1066,18 @@ class OCRBatchService:
                             message=f"File {file_idx}/{total_files}: {file_name} - OCR batch {batch_start_idx + 1}-{batch_end_idx}/{len(pages_needing_ocr)}"
                         )
 
-                        # Process batch
-                        texts = self._process_page_batch(pdf, batch_page_nums, file_name)
+                        # Process batch - returns (text, ocr_result) tuples
+                        batch_results = self._process_page_batch(pdf, batch_page_nums, file_name)
 
                         # Store results and track success/failure
-                        for page_num, text in zip(batch_page_nums, texts):
-                            if text:  # Only store non-empty text
-                                page_texts[page_num] = text
+                        for page_num, (text, ocr_result) in zip(batch_page_nums, batch_results):
+                            # Always store the result, even if empty (prevent pages from being lost)
+                            page_texts[page_num] = (text, ocr_result)
+                            if text:  # Track successful OCR
                                 result['pages_ocr'] += 1
-                            else:  # Track failed OCR attempts
-                                logger.warning(f"Page {page_num+1}: OCR failed, no text extracted")
-                                result['pages_ocr_failed'] = result.get('pages_ocr_failed', 0) + 1
+                            else:  # Track empty OCR results (blank pages, images, etc.)
+                                logger.warning(f"Page {page_num+1}: OCR returned empty text")
+                                result['pages_ocr_empty'] = result.get('pages_ocr_empty', 0) + 1
 
                         # Memory cleanup every N pages
                         if (batch_end_idx % self.CLEANUP_PAGE_INTERVAL) == 0:
@@ -775,10 +1093,17 @@ class OCRBatchService:
 
                 # Save PDF with embedded OCR text layers
                 try:
+                    # Track original file size for reporting
+                    original_size = Path(file_path).stat().st_size
+
                     # Open the original PDF with fitz
                     doc = fitz.open(file_path)
 
-                    # Add invisible text layers to OCR'd pages with clean rebuild
+                    # Analyze pages to determine processing strategy (hybrid mode)
+                    from .pdf_text_layer_analyzer import PDFTextLayerAnalyzer, PageType
+                    analyzer = PDFTextLayerAnalyzer()
+
+                    # Add invisible text layers to OCR'd pages
                     # IMPORTANT: Process in REVERSE order to avoid index shifting issues
                     # When we rebuild page 0, indices for pages 5, 10 shift
                     # By processing from end to beginning, indices remain stable
@@ -787,14 +1112,16 @@ class OCRBatchService:
                             if page_num not in page_texts:
                                 continue
 
-                            ocr_text = page_texts[page_num]
+                            # Unpack text and OCR result
+                            ocr_text, ocr_result = page_texts[page_num]
 
-                            # Skip if no text (failed OCR)
+                            # Log if OCR returned empty text, but still process to embed empty layer
                             if not ocr_text:
-                                logger.warning(f"Skipping page {page_num+1}: No OCR text available")
-                                continue
+                                logger.warning(f"Page {page_num+1}: OCR returned empty text, embedding empty layer")
+                                # Don't skip - allow empty text layers to be embedded
 
                             # Quality comparison (from Step 2)
+                            should_replace = True
                             if page_num in original_texts and original_texts[page_num]:
                                 should_replace, reason = self._should_replace_with_ocr(
                                     original_texts[page_num],
@@ -804,25 +1131,81 @@ class OCRBatchService:
                                 )
 
                                 if not should_replace:
+                                    # Check if both original and OCR are below quality threshold
+                                    original_score = self._calculate_quality_score(original_texts[page_num], doc[page_num])
+                                    if original_score < self.config.min_quality_threshold:
+                                        logger.warning(
+                                            f"Page {page_num+1}: Both original and OCR are low quality "
+                                            f"(original: {original_score:.2%}, threshold: {self.config.min_quality_threshold:.2%}), "
+                                            f"keeping original but flagging for review"
+                                        )
+                                        result['pages_low_quality'] = result.get('pages_low_quality', 0) + 1
                                     logger.info(f"Page {page_num+1}: Keeping original - {reason}")
                                     continue
 
-                            # CLEAN REBUILD WITH OCR
+                            # Analyze page to determine rebuild strategy
+                            page_analysis = analyzer.analyze_page(doc[page_num], page_num)
+
+                            # Determine rebuild strategy based on page type
+                            if page_analysis.page_type == PageType.SCANNED_PAGE:
+                                # Fully scanned page: needs full rebuild with compression
+                                rebuild_strategy = "full"
+                                logger.debug(f"Page {page_num+1}: Using FULL rebuild (scanned page)")
+                            else:
+                                # Page with some content: use overlay only (no re-render)
+                                rebuild_strategy = "overlay"
+                                logger.debug(f"Page {page_num+1}: Using OVERLAY strategy ({page_analysis.page_type.value})")
+
+                            # Process page with determined strategy
                             try:
-                                self._clean_rebuild_page_with_ocr(doc, page_num, ocr_text)
-                                logger.info(f"Page {page_num+1}: Embedded clean OCR layer")
+                                self._clean_rebuild_page_with_ocr(
+                                    doc=doc,
+                                    page_num=page_num,
+                                    ocr_text=ocr_text,
+                                    ocr_result=ocr_result,
+                                    rebuild_strategy=rebuild_strategy
+                                )
+                                logger.info(f"Page {page_num+1}: Embedded OCR layer ({rebuild_strategy} strategy)")
+
+                                # Track strategy usage
+                                strategy_key = f'pages_{rebuild_strategy}_strategy'
+                                result[strategy_key] = result.get(strategy_key, 0) + 1
+
                             except Exception as e:
                                 logger.error(f"Page {page_num+1}: Failed to embed OCR - {e}")
                                 # Continue with other pages
 
-                    # Save the modified PDF
-                    doc.save(str(output_path), garbage=4, deflate=True)
+                    # Save the modified PDF with optimized settings
+                    # - garbage=4: Maximum garbage collection (removes unused objects)
+                    # - deflate=True: Compress text streams
+                    # - clean=True: Clean up and optimize PDF structure
+                    # - pretty=False: Don't pretty-print (smaller file size)
+                    doc.save(
+                        str(output_path),
+                        garbage=4,
+                        deflate=True,
+                        clean=True,
+                        pretty=False
+                    )
                     doc.close()
+
+                    # Track file size changes
+                    final_size = output_path.stat().st_size
+                    size_increase_ratio = final_size / original_size if original_size > 0 else 1.0
+                    size_increase_mb = (final_size - original_size) / (1024 * 1024)
 
                     result['output_path'] = str(output_path)
                     result['status'] = 'success'
+                    result['original_size_mb'] = round(original_size / (1024 * 1024), 2)
+                    result['final_size_mb'] = round(final_size / (1024 * 1024), 2)
+                    result['size_increase_ratio'] = round(size_increase_ratio, 2)
+                    result['size_increase_mb'] = round(size_increase_mb, 2)
 
-                    logger.info(f"Saved PDF with OCR text layers to {output_path}")
+                    logger.info(
+                        f"Saved PDF with OCR text layers to {output_path} - "
+                        f"Size: {result['original_size_mb']:.2f}MB → {result['final_size_mb']:.2f}MB "
+                        f"({size_increase_ratio:.2f}x, +{size_increase_mb:.2f}MB)"
+                    )
 
                 except Exception as save_error:
                     logger.error(f"Failed to save PDF {file_name}: {save_error}", exc_info=True)
@@ -933,13 +1316,10 @@ class OCRBatchService:
 
             # Categorize result
             if result['status'] == 'success':
-                successful.append({
-                    'file': file_path,
-                    'pages_processed': result['pages_processed'],
-                    'pages_ocr': result['pages_ocr'],
-                    'pages_text_layer': result['pages_text_layer'],
-                    'output_path': result['output_path']
-                })
+                # Pass through all fields from _process_single_file
+                success_result = dict(result)  # Copy all fields
+                success_result['file'] = file_path  # Add file path
+                successful.append(success_result)
                 self.stats.successful_files += 1
             else:
                 failed.append({
@@ -968,6 +1348,12 @@ class OCRBatchService:
             f"({self.stats.total_pages_ocr} OCR, {self.stats.total_pages_text_layer} text layer) "
             f"in {duration:.1f}s"
         )
+        
+        # Log engine pool performance summary
+        if self.ocr_service and self.ocr_service.use_pooling:
+            from .ocr.engine_pool import get_engine_pool
+            pool = get_engine_pool()
+            pool.log_performance_summary()
 
         return {
             'successful': successful,
@@ -981,6 +1367,10 @@ class OCRBatchService:
         logger.info("Cleaning up OCR batch service...")
 
         if self.ocr_service is not None:
+            # End session and keep engines in pool for future use
+            # Set cleanup=False to keep engines in pool (for next batch)
+            # Set cleanup=True to force immediate cleanup
+            self.ocr_service.end_session(cleanup=False)
             self.ocr_service.cleanup()
             self.ocr_service = None
 

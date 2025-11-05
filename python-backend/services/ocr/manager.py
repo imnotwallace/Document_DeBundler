@@ -68,6 +68,16 @@ class OCRManager:
 
         except Exception as e:
             logger.error(f"Failed to initialize {engine_name}: {e}")
+            
+            # Cleanup failed engine before fallback to prevent memory leaks
+            if self.engine is not None:
+                try:
+                    logger.info(f"Cleaning up failed {engine_name} engine before fallback")
+                    self.engine.cleanup()
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup {engine_name}: {cleanup_error}")
+                finally:
+                    self.engine = None
 
             if self.fallback_enabled and engine_name != "tesseract":
                 logger.info("Attempting fallback to Tesseract...")
