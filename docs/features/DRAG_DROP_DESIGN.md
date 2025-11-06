@@ -2,7 +2,28 @@
 
 **Feature**: Drag and drop mechanism for PDF files and folders in OCR Module
 **Date**: 2025-11-06
-**Status**: Design Phase
+**Status**: Design Phase - **REQUIRES UPDATE TO MATCH DEVELOP BRANCH**
+
+---
+
+## ⚠️ IMPORTANT NOTICE
+
+**This design document was initially created based on commit `afdc5d1` but the `develop` branch has since advanced with significant new features:**
+
+- ✅ Advanced OCR Settings modal (`AdvancedOCRSettings.svelte`)
+- ✅ OCR configuration store (`ocrConfig.ts`) with `exportOCRConfigForBackend()`
+- ✅ Language pack management system
+- ✅ Intelligent preprocessing pipeline
+- ✅ OCR memory calculator
+- ✅ Enhanced hardware detection
+
+**Before implementing this design:**
+1. Merge `develop` branch into feature branch
+2. Review the updated OCRModule.svelte (lines 13, 17, 45, 286-293, 428-438, 513-517)
+3. Update drag & drop implementation to account for new OCR config integration
+4. Test compatibility with Advanced Settings modal
+
+**The core drag & drop design remains valid** as the center panel structure (lines 480-502) is unchanged, but integration points need adjustment.
 
 ---
 
