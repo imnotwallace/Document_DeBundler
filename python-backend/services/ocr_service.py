@@ -423,6 +423,10 @@ class OCRService:
 
     def is_available(self) -> bool:
         """Check if OCR is available and initialized"""
+        # If using pooling, manager existence is enough (engine is lazy-initialized)
+        if self.use_pooling:
+            return self.manager is not None
+        # Otherwise, check if engine is initialized
         return self.manager is not None and self.manager.engine is not None
 
     def get_engine_info(self) -> dict:

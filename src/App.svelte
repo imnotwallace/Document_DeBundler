@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { invoke } from "@tauri-apps/api/core";
   import { theme } from "./lib/stores/theme";
   import { currentModule, navigateToMainMenu } from "./lib/stores/navigation";
@@ -7,6 +8,7 @@
   import Button from "./lib/components/shared/Button.svelte";
   import Modal from "./lib/components/shared/Modal.svelte";
   import ProgressBar from "./lib/components/shared/ProgressBar.svelte";
+  import { initializeLanguagePackService } from './lib/services/languagePackService';
 
   // Existing state from original App.svelte
   let selectedFile: string | null = null;
@@ -69,6 +71,19 @@
       return (bytes / (1024 * 1024)).toFixed(2) + " MB";
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
   }
+
+  // Initialize language pack service on mount
+  onMount(async () => {
+    // Initialize language pack service
+    try {
+      console.log('Initializing language pack service...');
+      await initializeLanguagePackService();
+      console.log('Language pack service initialized successfully');
+    } catch (err) {
+      console.error('Failed to initialize language pack service:', err);
+      // Don't throw - allow app to continue even if language pack service fails
+    }
+  });
 </script>
 
 <main class="w-full h-full">

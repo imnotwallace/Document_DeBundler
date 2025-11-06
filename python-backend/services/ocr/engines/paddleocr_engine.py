@@ -22,6 +22,7 @@ import numpy as np
 
 from ..base import OCREngine, OCRResult, OCRConfig
 from ..vram_monitor import VRAMMonitor
+from ..config import detect_model_type
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ class PaddleOCREngine(OCREngine):
         self._vram_monitor: Optional[VRAMMonitor] = None
         self._current_batch_size = config.batch_size
         self._adaptive_enabled = config.enable_adaptive_batch_sizing
+        self._model_version: str = "mobile"  # Will be set during initialization
+        self._rec_model_name: str = "PP-OCRv5_mobile_rec"  # Default fallback  # Will be detected during initialization
 
     def initialize(self) -> None:
         """Initialize PaddleOCR engine"""
@@ -45,25 +48,71 @@ class PaddleOCREngine(OCREngine):
 
         try:
             from paddleocr import PaddleOCR
+            import paddle
 
             # Determine GPU usage
             use_gpu = self.config.use_gpu and self._check_gpu_available()
 
             if use_gpu:
                 logger.info("Initializing PaddleOCR with GPU acceleration")
+                
+                # CRITICAL FIX: Pre-initialize CUDA context to prevent first-inference hang
+                try:
+                    logger.info("Pre-initializing CUDA context...")
+                    paddle.device.set_device('gpu:0')
+                    # Force CUDA initialization with a simple operation
+                    dummy = paddle.to_tensor([1.0], place=paddle.CUDAPlace(0))
+                    paddle.device.cuda.synchronize()
+                    del dummy
+                    logger.info("CUDA context initialized successfully")
+                except Exception as e:
+                    logger.warning(f"CUDA pre-initialization failed: {e}, will retry during model load")
             else:
                 if self.config.use_gpu:
                     logger.warning("GPU requested but not available, using CPU")
                 else:
                     logger.info("Initializing PaddleOCR with CPU")
 
-            # Get language(s)
+            # Get language(s) and determine model version
             lang = self.config.languages[0] if self.config.languages else 'en'
+            model_version = getattr(self.config, 'model_version', 'mobile')  # Default to mobile
+            
+            # Import language pack metadata to get correct model name
+            try:
+                import sys
+                from pathlib import Path
+                # Add services directory to path if not already there
+                services_dir = Path(__file__).parent.parent.parent
+                if str(services_dir) not in sys.path:
+                    sys.path.insert(0, str(services_dir))
+                
+                from services.language_pack_metadata import get_language_pack_with_version
+                
+                # Get language pack info with the requested version
+                lang_pack = get_language_pack_with_version(lang, model_version)
+                
+                if lang_pack:
+                    rec_model_name = lang_pack.get_recognition_model_name()
+                    logger.info(f"Selected recognition model: {rec_model_name} for language '{lang}' (version: {model_version})")
+                else:
+                    # Fall back to English mobile version if language not found
+                    logger.warning(f"Language '{lang}' not found in metadata, falling back to English mobile")
+                    rec_model_name = "PP-OCRv5_mobile_rec"
+                    lang = "en"
+            except Exception as e:
+                # Fall back to English mobile version on any error
+                logger.warning(f"Failed to determine model version from metadata: {e}, falling back to English mobile")
+                rec_model_name = "PP-OCRv5_mobile_rec"
+                lang = "en"
+                model_version = "mobile"
+            
+            logger.info(f"Initializing PaddleOCR - Language: {lang}, Model: {rec_model_name}, Version: {model_version}")
 
             # Initialize PaddleOCR with 3.x API
             # PaddleOCR 3.3.1 initialization parameters
             ocr_kwargs = {
                 'lang': lang,
+                'rec_model_name': rec_model_name,  # Explicitly specify recognition model
                 'use_textline_orientation': self.config.enable_angle_classification,
                 'text_det_limit_side_len': 18000,      # Support ultra-high-DPI scans (up to 1600 DPI on letter-size pages)
                 'text_det_limit_type': 'max',          # Specify max dimension behavior
@@ -130,6 +179,27 @@ class PaddleOCREngine(OCREngine):
             logger.info("PaddleOCR instance created successfully")
 
             self._gpu_available = use_gpu
+            
+            # Store model version from config
+            self._model_version = model_version
+            self._rec_model_name = rec_model_name
+            logger.info(f"Model version: {self._model_version}, Recognition model: {self._rec_model_name}")
+            
+            # CRITICAL FIX: Warmup with dummy inference to complete CUDA initialization
+            if use_gpu:
+                try:
+                    logger.info("Performing GPU warmup inference...")
+                    # Create small dummy image (100x100 white image)
+                    dummy_image = np.ones((100, 100, 3), dtype=np.uint8) * 255
+                    # Run prediction to trigger full CUDA setup
+                    _ = self.ocr.predict(dummy_image)
+                    # Force synchronization
+                    paddle.device.cuda.synchronize()
+                    logger.info("GPU warmup completed successfully")
+                except Exception as e:
+                    logger.error(f"GPU warmup failed: {e}", exc_info=True)
+                    raise RuntimeError(f"GPU initialization failed during warmup: {e}")
+
             self._initialized = True
 
             # Initialize VRAM monitor if GPU is being used and monitoring is enabled
@@ -234,8 +304,18 @@ class PaddleOCREngine(OCREngine):
         start_time = time.time()
 
         try:
+            # CRITICAL FIX: Ensure CUDA synchronization for GPU operations
+            if self._gpu_available:
+                import paddle
+                paddle.device.cuda.synchronize()
+            
             # Run OCR using Paddle 3.x predict() API
             result = self.ocr.predict(image)
+            
+            # Force CUDA synchronization after inference
+            if self._gpu_available:
+                import paddle
+                paddle.device.cuda.synchronize()
             
             # CRITICAL DEBUG: Log what PaddleOCR actually returns
             logger.info(f"PaddleOCR predict() returned: type={type(result)}, value={result}")
@@ -448,3 +528,24 @@ class PaddleOCREngine(OCREngine):
     def is_available(self) -> bool:
         """Check if PaddleOCR engine is available and ready to process"""
         return self._initialized and self.ocr is not None
+
+    
+    @property
+    def model_version(self) -> str:
+        """
+        Get the model version (mobile or server).
+        
+        Returns:
+            "mobile" or "server"
+        """
+        return getattr(self, '_model_version', 'mobile')
+    
+    @property
+    def rec_model_name(self) -> str:
+        """
+        Get the recognition model name being used.
+        
+        Returns:
+            Recognition model name (e.g., "PP-OCRv5_server_rec")
+        """
+        return getattr(self, '_rec_model_name', 'PP-OCRv5_mobile_rec')

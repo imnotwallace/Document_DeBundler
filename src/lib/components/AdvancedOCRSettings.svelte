@@ -4,6 +4,9 @@
   import Button from './shared/Button.svelte';
   import { ocrConfig, updateOCRConfig, resetOCRConfig, type OCRConfig, type ProcessingMode } from '../stores/ocrConfig';
   import { invoke } from "@tauri-apps/api/core";
+  import LanguagePackManager from './LanguagePackManager.svelte';
+  import { isLanguageInstalled, availableLanguages, isLoadingLanguages } from '../stores/languagePackStore';
+  import { loadAvailableLanguages } from '../services/languagePackService';
 
   // Props
   export let isOpen: boolean = false;
@@ -18,41 +21,28 @@
   let systemMemoryGb: number = 0;
   let systemMaxDpi: number = 600; // Will be calculated
   let calculatedBatchSize: number = 10;
+  let showLanguagePackManager: boolean = false;
 
   // Constants
   const DEFAULT_DPI = 300;
   const MIN_DPI = 250;
 
-  // Initialize on mount - load hardware capabilities once
-  onMount(() => {
-    console.log('[AdvancedOCRSettings] Component mounted, loading hardware capabilities');
-    // Load hardware capabilities once when component mounts (not every time modal opens)
+  // Initialize on mount - load hardware capabilities and languages
+  onMount(async () => {
+    console.log('[AdvancedOCRSettings] Component mounted, loading hardware capabilities and languages');
+    // Load hardware capabilities once when component mounts
     loadSystemRecommendations();
-  });
 
-  // Available languages for PaddleOCR
-  const availableLanguages = [
-    { code: 'en', name: 'English', supported: true },
-    { code: 'ch', name: 'Chinese (Simplified)', supported: true },
-    { code: 'chinese_cht', name: 'Chinese (Traditional)', supported: true },
-    { code: 'fr', name: 'French', supported: true },
-    { code: 'german', name: 'German', supported: true },
-    { code: 'es', name: 'Spanish', supported: true },
-    { code: 'pt', name: 'Portuguese', supported: true },
-    { code: 'ru', name: 'Russian', supported: true },
-    { code: 'ar', name: 'Arabic', supported: true },
-    { code: 'hi', name: 'Hindi', supported: true },
-    { code: 'japan', name: 'Japanese', supported: true },
-    { code: 'korean', name: 'Korean', supported: true },
-    { code: 'it', name: 'Italian', supported: true },
-    { code: 'nl', name: 'Dutch', supported: true },
-    { code: 'vi', name: 'Vietnamese', supported: true },
-    { code: 'th', name: 'Thai', supported: true },
-    { code: 'tr', name: 'Turkish', supported: true },
-    { code: 'pl', name: 'Polish', supported: true },
-    { code: 'sv', name: 'Swedish', supported: true },
-    { code: 'da', name: 'Danish', supported: true },
-  ];
+    // Load available languages if not already loaded
+    if ($availableLanguages.length === 0 && !$isLoadingLanguages) {
+      try {
+        await loadAvailableLanguages();
+        console.log('[AdvancedOCRSettings] Languages loaded successfully');
+      } catch (err) {
+        console.error('[AdvancedOCRSettings] Failed to load languages:', err);
+      }
+    }
+  });
 
   // Processing mode options with detailed tooltips
   const processingModes: Array<{ value: ProcessingMode; label: string; description: string; tooltip: string }> = [
@@ -326,14 +316,69 @@
         class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
         bind:value={localConfig.languages[0]}
       >
-        {#each availableLanguages as lang}
-          <option value={lang.code}>{lang.name}</option>
+        {#each $availableLanguages as lang}
+          <option
+            value={lang.code}
+            disabled={!lang.installed}
+          >
+            {lang.name}
+            {#if !lang.installed}
+              (Download Required)
+            {/if}
+          </option>
         {/each}
       </select>
       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-        Language models will be automatically downloaded if not present (first use only)
+        Use 'Manage Language Packs' button below to download additional languages.
       </p>
+
+      <!-- Model Version Selector -->
+      {@const selectedLang = $availableLanguages.find(l => l.code === localConfig.languages[0])}
+      {#if selectedLang && selectedLang.has_server_version}
+        <div class="mt-3">
+          <label for="modelVersion" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            Model Version
+          </label>
+          <select
+            id="modelVersion"
+            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            bind:value={localConfig.modelVersion}
+          >
+            <option value="server">Server (Higher Accuracy)</option>
+            <option value="mobile">Mobile (Faster, Lower Memory)</option>
+          </select>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            {#if localConfig.modelVersion === 'server'}
+              Server models provide the best accuracy but require more memory and processing time.
+            {:else}
+              Mobile models are optimized for speed and lower memory usage, suitable for resource-constrained environments.
+            {/if}
+          </p>
+        </div>
+      {:else}
+        <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          {#if selectedLang}
+            This language only has a mobile model available.
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Manage Language Packs Button -->
+      <button
+        type="button"
+        class="manage-packs-button"
+        on:click={() => showLanguagePackManager = !showLanguagePackManager}
+      >
+        {showLanguagePackManager ? 'Hide' : 'Manage'} Language Packs
+      </button>
     </div>
+
+    <!-- Language Pack Manager (conditionally shown) -->
+    {#if showLanguagePackManager}
+      <div class="language-pack-section">
+        <LanguagePackManager />
+      </div>
+    {/if}
 
     <!-- Force CPU Mode -->
     <div class="flex items-center justify-between">
@@ -549,3 +594,35 @@
     </div>
   </div>
 </Modal>
+
+<style>
+  .manage-packs-button {
+    margin-top: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .manage-packs-button:hover {
+    background: #2563eb;
+  }
+
+  .language-pack-section {
+    margin-top: 1.5rem;
+    padding: 1rem;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+  }
+
+  /* Dark mode support */
+  :global(.dark) .language-pack-section {
+    background: #1f2937;
+    border-color: #374151;
+  }
+</style>

@@ -51,6 +51,39 @@ pub struct ProcessingStatus {
     pub progress_percent: f32,
 }
 
+// ===== Language Pack Types =====
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LanguageInfo {
+    pub code: String,
+    pub name: String,
+    pub installed: bool,
+    pub script_name: String,  // e.g., "latin", "arabic", "cyrillic"
+    pub script_description: String,  // Description of what languages use this script
+    pub total_size_mb: f32,
+    pub detection_installed: bool,
+    pub recognition_installed: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LanguageListResponse {
+    pub languages: Vec<LanguageInfo>,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InstalledLanguagesResponse {
+    pub installed_languages: Vec<String>,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DownloadResponse {
+    pub success: bool,
+    pub language_code: String,
+    pub message: String,
+}
+
 /// Opens a file dialog for selecting a PDF file
 #[tauri::command]
 pub async fn select_pdf_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
@@ -156,6 +189,7 @@ pub async fn get_pdf_page_count(file_path: String, app: tauri::AppHandle, state:
         command: "analyze".to_string(),
         file_path: Some(file_path.clone()),
         options: None,
+        request_id: None,
     };
 
     {
@@ -251,6 +285,7 @@ pub async fn start_processing(
         command: "process".to_string(),
         file_path: Some(file_path.clone()),
         options: Some(serde_json::Value::Object(options)),
+        request_id: None,
     };
 
     {
@@ -350,6 +385,7 @@ pub async fn start_batch_ocr(
         command: "ocr_batch".to_string(),
         file_path: None,
         options: Some(serde_json::Value::Object(options)),
+        request_id: None,
     };
 
     {
@@ -388,6 +424,7 @@ pub async fn cancel_processing(state: State<'_, AppState>) -> Result<String, Str
         command: "cancel".to_string(),
         file_path: None,
         options: None,
+        request_id: None,
     };
 
     {
@@ -491,9 +528,6 @@ pub async fn get_hardware_capabilities(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    use std::time::Duration;
-    use tokio::time::timeout;
-
     // Ensure Python process is started
     {
         let process = state.python_process.lock()
@@ -514,55 +548,292 @@ pub async fn get_hardware_capabilities(
         }
     }
 
-    // Send hardware capabilities command
+    // Send command and wait for response
     let command = PythonCommand {
         command: "get_hardware_capabilities".to_string(),
         file_path: None,
         options: None,
+        request_id: None, // Will be set by send_command_and_wait
     };
 
+    // Clone the process to avoid holding lock across await
+    let temp_process = {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.clone_ref()
+    };
+
+    let event = temp_process.send_command_and_wait(command, 10).await?;
+
+    match event.event_type.as_str() {
+        "result" => {
+            // Return the hardware capabilities data directly
+            Ok(event.data)
+        }
+        "error" => {
+            let msg = event.data.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            Err(format!("Python error: {}", msg))
+        }
+        _ => Err(format!("Unexpected event type: {}", event.event_type))
+    }
+}
+
+// ===== Language Pack Commands =====
+
+/// List all available language packs with installation status
+#[tauri::command]
+pub async fn list_available_languages(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<LanguageListResponse, String> {
+    // Ensure Python process is started
     {
         let process = state.python_process.lock()
             .map_err(|e| format!("Failed to lock process: {}", e))?;
-        process.send_command(command)?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
     }
 
-    // Wait for result with timeout (10 seconds)
-    let result = timeout(Duration::from_secs(10), async {
-        loop {
-            let event = {
-                let process = state.python_process.lock()
-                    .map_err(|e| format!("Failed to lock process: {}", e))?;
-                process.read_event()?
-            };
-
-            if let Some(evt) = event {
-                match evt.event_type.as_str() {
-                    "result" => {
-                        // Return the hardware capabilities data directly
-                        return Ok(serde_json::json!(evt.data));
-                    }
-                    "error" => {
-                        let msg = evt.data.get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Unknown error");
-                        return Err(format!("Python error: {}", msg));
-                    }
-                    _ => {
-                        // Ignore other events
-                        continue;
-                    }
-                }
-            }
-
-            // Small delay to prevent busy waiting
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    // Start event loop
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
         }
-    }).await;
+    }
 
-    match result {
-        Ok(Ok(capabilities)) => Ok(capabilities),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("Timeout waiting for hardware capabilities".to_string()),
+    // Send command and wait for response
+    let command = PythonCommand {
+        command: "list_available_languages".to_string(),
+        file_path: None,
+        options: None,
+        request_id: None, // Will be set by send_command_and_wait
+    };
+
+    // Clone the process to avoid holding lock across await
+    let temp_process = {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.clone_ref()
+    };
+
+    let event = temp_process.send_command_and_wait(command, 10).await?;
+
+    match event.event_type.as_str() {
+        "result" => {
+            let response: LanguageListResponse = serde_json::from_value(event.data)
+                .map_err(|e| format!("Parse error: {}", e))?;
+            Ok(response)
+        }
+        "error" => {
+            let msg = event.data.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            Err(format!("Python error: {}", msg))
+        }
+        _ => Err(format!("Unexpected event type: {}", event.event_type))
+    }
+}
+
+/// List installed language packs
+#[tauri::command]
+pub async fn list_installed_languages(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<InstalledLanguagesResponse, String> {
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }
+
+    // Start event loop
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Send command and wait for response
+    let command = PythonCommand {
+        command: "list_installed_languages".to_string(),
+        file_path: None,
+        options: None,
+        request_id: None, // Will be set by send_command_and_wait
+    };
+
+    // Clone the process to avoid holding lock across await
+    let temp_process = {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.clone_ref()
+    };
+
+    let event = temp_process.send_command_and_wait(command, 10).await?;
+
+    match event.event_type.as_str() {
+        "result" => {
+            let response: InstalledLanguagesResponse = serde_json::from_value(event.data)
+                .map_err(|e| format!("Parse error: {}", e))?;
+            Ok(response)
+        }
+        "error" => {
+            let msg = event.data.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            Err(format!("Python error: {}", msg))
+        }
+        _ => Err(format!("Unexpected event type: {}", event.event_type))
+    }
+}
+
+/// Get installation status for a specific language
+#[tauri::command]
+pub async fn get_language_status(
+    language_code: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<LanguageInfo, String> {
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }
+
+    // Start event loop
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Send command and wait for response
+    let command = PythonCommand {
+        command: "get_language_status".to_string(),
+        file_path: None,
+        options: Some(serde_json::json!({
+            "language_code": language_code
+        })),
+        request_id: None, // Will be set by send_command_and_wait
+    };
+
+    // Clone the process to avoid holding lock across await
+    let temp_process = {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.clone_ref()
+    };
+
+    let event = temp_process.send_command_and_wait(command, 10).await?;
+
+    match event.event_type.as_str() {
+        "result" => {
+            let status: LanguageInfo = serde_json::from_value(event.data)
+                .map_err(|e| format!("Parse error: {}", e))?;
+            Ok(status)
+        }
+        "error" => {
+            let msg = event.data.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            Err(format!("Python error: {}", msg))
+        }
+        _ => Err(format!("Unexpected event type: {}", event.event_type))
+    }
+}
+
+/// Download and install a language pack
+#[tauri::command]
+pub async fn download_language_pack(
+    language_code: String,
+    enable_angle_classification: Option<bool>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DownloadResponse, String> {
+    eprintln!("[DEBUG] download_language_pack called for language: {}", language_code);
+
+    // Ensure Python process is started
+    eprintln!("[DEBUG] Checking if Python process is started...");
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            eprintln!("[DEBUG] Python not running, starting...");
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        } else {
+            eprintln!("[DEBUG] Python already running");
+        }
+    }
+
+    // Start event loop (progress events will be broadcast to frontend automatically)
+    eprintln!("[DEBUG] Starting event loop...");
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+    eprintln!("[DEBUG] Event loop started");
+
+    // Send command and wait for response (5 minutes timeout for download)
+    eprintln!("[DEBUG] Creating command...");
+    let command = PythonCommand {
+        command: "download_language_pack".to_string(),
+        file_path: None,
+        options: Some(serde_json::json!({
+            "language_code": language_code,
+            "enable_angle_classification": enable_angle_classification.unwrap_or(false)
+        })),
+        request_id: None, // Will be set by send_command_and_wait
+    };
+
+    // Clone the process to avoid holding lock across await
+    eprintln!("[DEBUG] Cloning process reference...");
+    let temp_process = {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.clone_ref()
+    };
+
+    eprintln!("[DEBUG] Calling send_command_and_wait with 300s timeout...");
+    let event = temp_process.send_command_and_wait(command, 300).await?;
+    eprintln!("[DEBUG] Received event response");
+
+    match event.event_type.as_str() {
+        "result" => {
+            let response: DownloadResponse = serde_json::from_value(event.data)
+                .map_err(|e| format!("Parse error: {}", e))?;
+            Ok(response)
+        }
+        "error" => {
+            let msg = event.data.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            Err(format!("Python error: {}", msg))
+        }
+        _ => Err(format!("Unexpected event type: {}", event.event_type))
     }
 }

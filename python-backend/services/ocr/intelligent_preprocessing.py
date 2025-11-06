@@ -255,17 +255,11 @@ class IntelligentPreprocessor:
             logger.debug(f"Applying technique: {technique.value}")
             gray = self._apply_single_technique(gray, technique)
 
-        # Convert back to RGB for OCR
-        try:
-            rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-        except:
-            # If already 3-channel or conversion fails
-            if len(gray.shape) == 3:
-                rgb = gray
-            else:
-                rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
-
-        return rgb
+        # IMPORTANT: Return grayscale image directly (no RGB conversion needed)
+        # Preprocessed images are ONLY used for OCR text extraction, then discarded
+        # OCR engines (PaddleOCR/Tesseract) work perfectly with grayscale
+        # Benefits: 3x less memory, faster processing, no color artifacts
+        return gray
 
     def _apply_single_technique(
         self,

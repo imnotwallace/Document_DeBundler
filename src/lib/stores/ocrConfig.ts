@@ -23,6 +23,7 @@ export interface OCRConfig {
 
   // Language settings
   languages: string[];
+  modelVersion: 'server' | 'mobile'; // OCR model version (server = high accuracy, mobile = faster)
 
   // Processing settings
   batchSize: number;
@@ -64,6 +65,7 @@ export const defaultOCRConfig: OCRConfig = {
 
   // Language settings
   languages: ['en'], // English by default
+  modelVersion: 'server', // Use server model by default (higher accuracy)
 
   // Processing settings
   batchSize: 10, // Will be auto-tuned based on hardware
@@ -133,6 +135,7 @@ export function exportOCRConfigForBackend(): Record<string, any> {
     gpu_id: config.gpuId,
     engine: config.engine,
     languages: config.languages,
+    model_version: config.modelVersion,
     batch_size: config.batchSize,
     max_memory_mb: config.maxMemoryMb,
     confidence_threshold: config.confidenceThreshold,

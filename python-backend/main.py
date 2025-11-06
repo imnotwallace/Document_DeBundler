@@ -24,13 +24,20 @@ class IPCHandler:
     def __init__(self):
         self.running = True
         self.cancelled = False
+        self.current_request_id = None
 
-    def send_event(self, event_type: str, data: Any):
+    def send_event(self, event_type: str, data: Any, request_id: str = None):
         """Send an event to the frontend via stdout"""
         event = {
             "type": event_type,
             "data": data
         }
+        # Include request_id if provided
+        if request_id:
+            event["request_id"] = request_id
+            logger.debug(f"Sending {event_type} event with request_id: {request_id}")
+        else:
+            logger.debug(f"Sending {event_type} event without request_id")
         print(json.dumps(event), flush=True)
 
     def send_progress(self, current: int, total: int, message: str, percent: float = None):
@@ -47,15 +54,18 @@ class IPCHandler:
 
     def send_result(self, result: Any):
         """Send processing result"""
-        self.send_event("result", result)
+        self.send_event("result", result, request_id=self.current_request_id)
 
     def send_error(self, error_message: str):
         """Send error message"""
-        self.send_event("error", {"message": error_message})
+        self.send_event("error", {"message": error_message}, request_id=self.current_request_id)
 
     def handle_command(self, command: Dict[str, Any]):
         """Process incoming command"""
         cmd_type = command.get("command")
+        # Extract request_id for request-response correlation
+        self.current_request_id = command.get("request_id")
+        logger.debug(f"Handling command '{cmd_type}' with request_id: {self.current_request_id}")
 
         if cmd_type == "analyze":
             self.handle_analyze(command)
@@ -65,6 +75,14 @@ class IPCHandler:
             self.handle_ocr_batch(command)
         elif cmd_type == "get_hardware_capabilities":
             self.handle_get_hardware_capabilities(command)
+        elif cmd_type == "list_available_languages":
+            self.handle_list_available_languages(command)
+        elif cmd_type == "list_installed_languages":
+            self.handle_list_installed_languages(command)
+        elif cmd_type == "get_language_status":
+            self.handle_get_language_status(command)
+        elif cmd_type == "download_language_pack":
+            self.handle_download_language_pack(command)
         elif cmd_type == "cancel":
             self.handle_cancel()
         else:
@@ -553,18 +571,22 @@ class IPCHandler:
         Returns GPU/CPU info and recommended settings
         """
         try:
-            from services.ocr.config import detect_hardware_capabilities, get_optimal_batch_size, get_adaptive_dpi
+            from services.ocr.config import detect_hardware_capabilities, get_optimal_batch_size, get_adaptive_dpi, detect_model_type
 
             logger.info("Detecting hardware capabilities...")
 
             # Detect hardware
             capabilities = detect_hardware_capabilities()
 
+            # Detect model type
+            model_type = detect_model_type()
+            
             # Calculate optimal batch size
             gpu_batch_size = get_optimal_batch_size(
                 use_gpu=True,
                 gpu_memory_gb=capabilities.get('gpu_memory_gb', 0),
-                system_memory_gb=capabilities.get('system_memory_gb', 0)
+                system_memory_gb=capabilities.get('system_memory_gb', 0),
+                model_type=model_type
             )
 
             # Calculate recommended DPI
@@ -572,7 +594,8 @@ class IPCHandler:
                 use_gpu=capabilities.get('gpu_available', False),
                 gpu_memory_gb=capabilities.get('gpu_memory_gb', 0),
                 system_memory_gb=capabilities.get('system_memory_gb', 0),
-                target_quality='balanced'
+                target_quality='balanced',
+                model_type=model_type
             )
 
             # Build response
@@ -596,6 +619,158 @@ class IPCHandler:
 
         except Exception as e:
             error_msg = f"Failed to detect hardware capabilities: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self.send_error(error_msg)
+
+    def handle_list_available_languages(self, command: Dict[str, Any]):
+        """
+        List all available language packs with installation status.
+        Returns list of languages with script-based model information.
+        """
+        try:
+            from services.language_pack_manager import get_language_pack_manager
+            from dataclasses import asdict
+
+            logger.info("Listing available languages...")
+
+            manager = get_language_pack_manager()
+            language_statuses = manager.get_all_language_statuses()
+
+            # Convert dataclasses to dicts
+            languages = [asdict(status) for status in language_statuses]
+
+            logger.info(f"Found {len(languages)} available languages")
+
+            # Send result
+            self.send_result({
+                'languages': languages,
+                'count': len(languages)
+            })
+
+        except Exception as e:
+            error_msg = f"Failed to list available languages: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self.send_error(error_msg)
+
+    def handle_list_installed_languages(self, command: Dict[str, Any]):
+        """
+        List installed language packs.
+        Returns list of language codes that are fully installed.
+        """
+        try:
+            from services.language_pack_manager import get_language_pack_manager
+
+            logger.info("Listing installed languages...")
+
+            manager = get_language_pack_manager()
+            installed = manager.get_installed_languages()
+
+            logger.info(f"Found {len(installed)} installed languages: {', '.join(installed)}")
+
+            # Send result
+            self.send_result({
+                'installed_languages': installed,
+                'count': len(installed)
+            })
+
+        except Exception as e:
+            error_msg = f"Failed to list installed languages: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self.send_error(error_msg)
+
+    def handle_get_language_status(self, command: Dict[str, Any]):
+        """
+        Get installation status for a specific language
+        Returns detailed status including missing models
+        """
+        try:
+            from services.language_pack_manager import get_language_pack_manager
+            from dataclasses import asdict
+
+            # Get language_code from options (sent by Rust)
+            options = command.get("options", {})
+            language_code = options.get("language_code")
+            if not language_code:
+                self.send_error("Missing required parameter: language_code")
+                return
+
+            logger.info(f"Checking status for language: {language_code}")
+
+            manager = get_language_pack_manager()
+            status = manager.get_language_status(language_code)
+
+            if status is None:
+                self.send_error(f"Language not supported: {language_code}")
+                return
+
+            # Convert dataclass to dict
+            status_dict = asdict(status)
+
+            logger.info(f"Language {language_code} status: installed={status.installed}")
+
+            # Send result
+            self.send_result(status_dict)
+
+        except Exception as e:
+            error_msg = f"Failed to get language status: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self.send_error(error_msg)
+
+    def handle_download_language_pack(self, command: Dict[str, Any]):
+        """
+        Download and install a language pack using PaddleOCR's auto-download.
+        Emits progress events during download and installation.
+        """
+        try:
+            from services.language_pack_manager import get_language_pack_manager
+            from dataclasses import asdict
+
+            # Get parameters from options (sent by Rust)
+            options = command.get("options", {})
+            language_code = options.get("language_code")
+
+            if not language_code:
+                self.send_error("Missing required parameter: language_code")
+                return
+
+            logger.info(f"Triggering PaddleOCR auto-download for language: {language_code}")
+
+            manager = get_language_pack_manager()
+
+            # Define progress callback that emits events
+            def progress_callback(progress):
+                # Convert dataclass to dict
+                progress_dict = asdict(progress)
+
+                # Emit language_download_progress event
+                self.send_event("language_download_progress", progress_dict)
+
+                # Also log progress
+                if progress.phase == "downloading":
+                    logger.info(f"{progress.message} ({progress.progress_percent:.0f}%)")
+                elif progress.phase == "complete":
+                    logger.info(f"Successfully installed: {progress.language_name}")
+                elif progress.phase == "error":
+                    logger.error(f"Download error: {progress.error}")
+
+            # Trigger download via PaddleOCR initialization
+            success = manager.trigger_language_download(
+                language_code,
+                progress_callback=progress_callback
+            )
+
+            if success:
+                # Send final result
+                self.send_result({
+                    'success': True,
+                    'language_code': language_code,
+                    'message': f'Successfully installed language pack: {language_code}'
+                })
+            else:
+                self.send_error(f"Failed to install language pack: {language_code}")
+
+        except Exception as e:
+            error_msg = f"Failed to download language pack: {str(e)}"
             logger.error(error_msg, exc_info=True)
             self.send_error(error_msg)
 

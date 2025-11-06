@@ -155,22 +155,25 @@ def get_optimal_batch_size(
     use_gpu: bool,
     gpu_memory_gb: float = 0,
     system_memory_gb: Optional[float] = None,
-    dpi: int = 300
+    dpi: int = 300,
+    model_type: str = "mobile"
 ) -> int:
     """
     Calculate optimal batch size based on available hardware and DPI.
 
     Optimized for 4GB VRAM systems with improved utilization.
     Accounts for DPI impact on memory usage (higher DPI = larger images = smaller batches).
+    Accounts for PP-OCRv5 model type (server models use 4-5x more VRAM than mobile).
 
     Args:
         use_gpu: Whether GPU will be used
         gpu_memory_gb: Available GPU memory in GB
         system_memory_gb: System RAM in GB (auto-detected if None)
         dpi: Target DPI for rendering (default: 300)
+        model_type: PP-OCRv5 model type ("mobile" or "server", default: "mobile")
 
     Returns:
-        Recommended batch size (adjusted for DPI)
+        Recommended batch size (adjusted for DPI and model type)
     """
     if system_memory_gb is None:
         system_memory_gb = get_system_memory_gb()
@@ -217,16 +220,27 @@ def get_optimal_batch_size(
         # Adjust for DPI
         adjusted_batch = max(1, int(base_batch / dpi_multiplier))
     
+    # Apply model type multiplier for server models
+    # PP-OCRv5 server models use ~4-5x more VRAM than mobile models
+    # Server: ~160MB file, ~400-600MB VRAM during inference
+    # Mobile: ~20MB file, ~100-150MB VRAM during inference
+    if model_type == "server":
+        # Reduce batch size by ~25% for server models
+        multiplier = 0.75
+        adjusted_batch = max(1, int(adjusted_batch * multiplier))
+        logger.debug(
+            f"Applied server model multiplier ({multiplier:.0%}) to batch size: "
+            f"{int(adjusted_batch / multiplier)} → {adjusted_batch}"
+        )
+    
     # Log warning for very high DPI
     if dpi >= 1200 and adjusted_batch == 1:
-        import logging
-        logger = logging.getLogger(__name__)
         logger.warning(
             f"High DPI ({dpi}) requires batch_size=1 for {gpu_memory_gb}GB VRAM. "
             f"Consider reducing DPI or processing in smaller chunks."
         )
     
-    return adjusted_batch  # 32GB+ RAM
+    return adjusted_batch
 
 
 def detect_hardware_capabilities() -> Dict[str, Any]:
@@ -348,16 +362,25 @@ def get_adaptive_dpi(
     use_gpu: bool,
     gpu_memory_gb: float = 0,
     system_memory_gb: Optional[float] = None,
-    target_quality: str = "balanced"
+    target_quality: str = "balanced",
+    preprocessing_enabled: bool = True,
+    model_type: str = "mobile"
 ) -> int:
     """
     Calculate adaptive DPI based on available hardware and quality target.
-
+    
+    IMPORTANT: Automatically adjusts for preprocessing memory overhead.
+    - Without preprocessing: 2 images per page
+    - With preprocessing: 3 images per page (original + deskewed + fully preprocessed)
+    - PP-OCRv5 server models use 4-5x more VRAM than mobile models
+    
     Args:
         use_gpu: Whether GPU is being used
         gpu_memory_gb: Available GPU memory in GB
         system_memory_gb: System RAM in GB (auto-detected if None)
         target_quality: Quality target ("low", "balanced", "high", "max", "ultra", "maximum")
+        preprocessing_enabled: Whether intelligent preprocessing is enabled (default: True)
+        model_type: PP-OCRv5 model type ("mobile" or "server", default: "mobile")
 
     Returns:
         Recommended DPI (150-1600)
@@ -410,6 +433,35 @@ def get_adaptive_dpi(
             # High RAM systems can handle higher DPI, but CPU processing is slow
             max_dpi = 1200
 
+    # Apply preprocessing memory multiplier if enabled
+    if preprocessing_enabled:
+        # Memory footprint increases from 2 images to 3 images per page
+        # Reduction factor: 0.57 (same as batch size adjustment)
+        # This means we can safely use ~57% of the DPI we'd normally support
+        multiplier = 0.57
+        max_dpi = int(max_dpi * multiplier)
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            f"Adjusted max DPI for 3-image preprocessing pipeline: "
+            f"{int(max_dpi / multiplier)} → {max_dpi} ({multiplier:.0%} multiplier)"
+        )
+
+    # Apply model type multiplier for server models
+    if model_type == "server":
+        # PP-OCRv5 server models use ~4-5x more VRAM than mobile models
+        # Reduce max DPI by ~25% for server models
+        multiplier = 0.75
+        max_dpi = int(max_dpi * multiplier)
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(
+            f"Adjusted max DPI for server model type: "
+            f"{int(max_dpi / multiplier)} → {max_dpi} ({multiplier:.0%} multiplier)"
+        )
+
     # Return the minimum of requested and maximum allowed
     recommended_dpi = min(base_dpi, max_dpi)
     
@@ -420,6 +472,7 @@ def get_adaptive_dpi(
         logger.warning(
             f"Requested DPI ({base_dpi}) reduced to {recommended_dpi} due to memory constraints. "
             f"Available: {'GPU ' + str(gpu_memory_gb) + 'GB VRAM' if use_gpu else 'CPU ' + str(system_memory_gb) + 'GB RAM'}"
+            f"{' (3-image preprocessing enabled)' if preprocessing_enabled else ''}"
         )
     
     return recommended_dpi
@@ -664,3 +717,47 @@ def get_model_directory() -> Path:
         logger.warning(f"Created models directory: {models_dir}")
 
     return models_dir
+
+
+def detect_model_type(model_dir: Optional[Path] = None) -> str:
+    """
+    Detect whether mobile or server PP-OCRv5 models are being used.
+    
+    Detection strategy:
+    1. Check recognition model file size (rec is much larger difference than det)
+    2. Mobile models: rec ~5-10MB total (~20MB combined det+rec+cls)
+    3. Server models: rec ~100-140MB total (~160MB combined det+rec+cls)
+    
+    Args:
+        model_dir: Path to models directory (auto-detected if None)
+    
+    Returns:
+        "mobile" or "server"
+    """
+    if model_dir is None:
+        model_dir = get_model_directory()
+    
+    # Check for recognition model file
+    rec_model_path = model_dir / "rec" / "inference.pdmodel"
+    
+    if not rec_model_path.exists():
+        # No bundled models, PaddleOCR will auto-download mobile by default
+        logger.info("No bundled models found, assuming mobile models (PaddleOCR default)")
+        return "mobile"
+    
+    try:
+        # Get model file size in MB
+        model_size_bytes = rec_model_path.stat().st_size
+        model_size_mb = model_size_bytes / (1024 * 1024)
+        
+        # Threshold: 20MB (mobile models are <20MB, server models are >20MB)
+        if model_size_mb < 20:
+            logger.info(f"Detected mobile model ({model_size_mb:.1f}MB recognition model)")
+            return "mobile"
+        else:
+            logger.info(f"Detected server model ({model_size_mb:.1f}MB recognition model)")
+            return "server"
+    
+    except Exception as e:
+        logger.warning(f"Failed to detect model type: {e}, assuming mobile")
+        return "mobile"

@@ -33,6 +33,10 @@ fn main() {
             cancel_batch_ocr,
             get_processing_status,
             get_hardware_capabilities,
+            list_available_languages,
+            list_installed_languages,
+            get_language_status,
+            download_language_pack,
             quit_app
         ])
         .run(tauri::generate_context!())

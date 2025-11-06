@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
+use uuid::Uuid;
 
 /// Represents the current state of the Python process
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +28,7 @@ pub struct PythonCommand {
     pub command: String,
     pub file_path: Option<String>,
     pub options: Option<serde_json::Value>,
+    pub request_id: Option<String>,
 }
 
 /// Event structure received from Python process
@@ -34,14 +38,16 @@ pub struct PythonEvent {
     #[serde(rename = "type")]
     pub event_type: String,
     pub data: serde_json::Value,
+    pub request_id: Option<String>,
 }
 
 /// Internal process state with thread-safe access
 struct ProcessInternals {
     child: Option<Child>,
-    stdout_reader: Option<BufReader<ChildStdout>>,
     state: ProcessState,
     event_loop_handle: Option<tokio::task::JoinHandle<()>>,
+    pending_requests: HashMap<String, oneshot::Sender<PythonEvent>>,
+    stdout_reader: Arc<Mutex<Option<BufReader<ChildStdout>>>>,
 }
 
 /// Python process manager with async event streaming support
@@ -55,10 +61,19 @@ impl PythonProcess {
         PythonProcess {
             internals: Arc::new(Mutex::new(ProcessInternals {
                 child: None,
-                stdout_reader: None,
                 state: ProcessState::Idle,
                 event_loop_handle: None,
+                pending_requests: HashMap::new(),
+                stdout_reader: Arc::new(Mutex::new(None)),
             })),
+        }
+    }
+
+    /// Creates a lightweight clone that shares the same internal state
+    /// Useful for avoiding holding locks across await points
+    pub fn clone_ref(&self) -> Self {
+        PythonProcess {
+            internals: Arc::clone(&self.internals),
         }
     }
 
@@ -115,7 +130,7 @@ impl PythonProcess {
         }
 
         internals.child = Some(child);
-        internals.stdout_reader = Some(reader);
+        *internals.stdout_reader.lock().unwrap() = Some(reader);
         internals.state = ProcessState::Running;
 
         Ok(())
@@ -156,6 +171,51 @@ impl PythonProcess {
         }
     }
 
+    /// Sends a command and waits for the response using request-response correlation
+    ///
+    /// # Arguments
+    /// * `command` - The command structure to send (request_id will be set automatically)
+    /// * `timeout_secs` - Timeout in seconds to wait for response
+    ///
+    /// # Returns
+    /// * `Ok(PythonEvent)` if response received successfully
+    /// * `Err(String)` if send failed, timeout occurred, or channel closed
+    pub async fn send_command_and_wait(
+        &self,
+        mut command: PythonCommand,
+        timeout_secs: u64
+    ) -> Result<PythonEvent, String> {
+        // Generate request ID
+        let request_id = Uuid::new_v4().to_string();
+        command.request_id = Some(request_id.clone());
+
+        // Create oneshot channel
+        let (tx, rx) = oneshot::channel();
+
+        // Register before sending
+        {
+            let mut internals = self.internals.lock()
+                .map_err(|e| format!("Failed to lock: {}", e))?;
+            internals.pending_requests.insert(request_id.clone(), tx);
+        }
+
+        // Send command
+        self.send_command(command)?;
+
+        // Wait for response with timeout
+        match timeout(Duration::from_secs(timeout_secs), rx).await {
+            Ok(Ok(event)) => Ok(event),
+            Ok(Err(_)) => Err("Channel closed".to_string()),
+            Err(_) => {
+                // Cleanup on timeout
+                let mut internals = self.internals.lock()
+                    .map_err(|e| format!("Failed to lock: {}", e))?;
+                internals.pending_requests.remove(&request_id);
+                Err(format!("Timeout after {} seconds waiting for response", timeout_secs))
+            }
+        }
+    }
+
     /// Starts the async event loop for streaming events from Python
     ///
     /// This method spawns a background task that continuously reads events from
@@ -173,6 +233,17 @@ impl PythonProcess {
     /// * `Ok(())` if event loop started successfully
     /// * `Err(String)` if startup failed
     pub fn start_event_loop(&self, app_handle: AppHandle) -> Result<(), String> {
+        // Check if event loop is already running
+        {
+            let internals = self.internals.lock()
+                .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+            if internals.event_loop_handle.is_some() {
+                eprintln!("[INFO] Python event loop already running, skipping start");
+                return Ok(());
+            }
+        }
+
         let internals_clone = Arc::clone(&self.internals);
 
         // Spawn async task for event streaming
@@ -201,6 +272,7 @@ impl PythonProcess {
                                     data: serde_json::json!({
                                         "message": "Processing cancelled by user"
                                     }),
+                                    request_id: None,
                                 },
                             );
                             false
@@ -214,6 +286,7 @@ impl PythonProcess {
                                     data: serde_json::json!({
                                         "message": msg.clone()
                                     }),
+                                    request_id: None,
                                 },
                             );
                             false
@@ -237,32 +310,75 @@ impl PythonProcess {
                 match event_result {
                     Ok(Ok(Some(event))) => {
                         eprintln!("Received event: {} - {:?}", event.event_type, event.data);
+                        if let Some(ref req_id) = event.request_id {
+                            eprintln!("[DEBUG] Event has request_id: {}", req_id);
+                        } else {
+                            eprintln!("[DEBUG] Event has NO request_id");
+                        }
+                        eprintln!("[DEBUG] Full event JSON: {}", serde_json::to_string(&event).unwrap_or_else(|_| "failed to serialize".to_string()));
 
-                        // Emit event based on type
-                        let emit_result = match event.event_type.as_str() {
-                            "progress" => app_handle.emit("python_progress", event.clone()),
-                            "result" => app_handle.emit("python_result", event.clone()),
-                            "error" => app_handle.emit("python_error", event.clone()),
+                        // Route event based on type and request_id
+                        match event.event_type.as_str() {
+                            "progress" => {
+                                // Broadcast progress to frontend
+                                let _ = app_handle.emit("python_progress", event.clone());
+                            }
+                            "language_download_progress" => {
+                                // Broadcast language download progress to frontend
+                                let _ = app_handle.emit("language-download-progress", event.clone());
+                            }
+                            "result" | "error" => {
+                                // Check if this is a response to a pending request
+                                if let Some(ref request_id) = event.request_id {
+                                    eprintln!("[DEBUG] Event has request_id: {}", request_id);
+                                    let mut internals_for_map = match internals_clone.lock() {
+                                        Ok(i) => i,
+                                        Err(e) => {
+                                            eprintln!("Failed to acquire lock for pending requests: {}", e);
+                                            continue;
+                                        }
+                                    };
+
+                                    eprintln!("[DEBUG] Pending requests: {:?}", internals_for_map.pending_requests.keys().collect::<Vec<_>>());
+                                    if let Some(sender) = internals_for_map.pending_requests.remove(request_id) {
+                                        // Send to waiting command handler
+                                        eprintln!("[DEBUG] Found matching pending request, sending to handler");
+                                        let _ = sender.send(event.clone());
+                                        continue;
+                                    } else {
+                                        eprintln!("[DEBUG] No matching pending request found for request_id: {}", request_id);
+                                    }
+                                } else {
+                                    eprintln!("[DEBUG] Event has NO request_id");
+                                }
+
+                                // Fallback: emit to frontend if no pending request
+                                // (for backwards compatibility with old-style direct reading)
+                                let emit_result = if event.event_type == "result" {
+                                    app_handle.emit("python_result", event.clone())
+                                } else {
+                                    app_handle.emit("python_error", event.clone())
+                                };
+
+                                if let Err(e) = emit_result {
+                                    eprintln!("Failed to emit event: {}", e);
+                                }
+
+                                // If error event, update state and stop loop
+                                if event.event_type == "error" {
+                                    if let Ok(mut internals) = internals_clone.lock() {
+                                        let error_msg = event.data["message"]
+                                            .as_str()
+                                            .unwrap_or("Unknown error")
+                                            .to_string();
+                                        internals.state = ProcessState::Error(error_msg);
+                                    }
+                                    break;
+                                }
+                            }
                             _ => {
                                 eprintln!("Unknown event type: {}", event.event_type);
-                                continue;
                             }
-                        };
-
-                        if let Err(e) = emit_result {
-                            eprintln!("Failed to emit event: {}", e);
-                        }
-
-                        // If error event, update state and stop loop
-                        if event.event_type == "error" {
-                            if let Ok(mut internals) = internals_clone.lock() {
-                                let error_msg = event.data["message"]
-                                    .as_str()
-                                    .unwrap_or("Unknown error")
-                                    .to_string();
-                                internals.state = ProcessState::Error(error_msg);
-                            }
-                            break;
                         }
                     }
                     Ok(Ok(None)) => {
@@ -285,6 +401,7 @@ impl PythonProcess {
                             PythonEvent {
                                 event_type: "error".to_string(),
                                 data: serde_json::json!({"message": error_msg}),
+                                request_id: None,
                             },
                         );
                         break;
@@ -329,6 +446,7 @@ impl PythonProcess {
                                     data: serde_json::json!({
                                         "message": "Python process terminated unexpectedly"
                                     }),
+                                    request_id: None,
                                 },
                             );
                             break;
@@ -357,34 +475,39 @@ impl PythonProcess {
     async fn read_event_async(
         internals: &Arc<Mutex<ProcessInternals>>,
     ) -> Result<Option<PythonEvent>, String> {
-        // This runs in a blocking context but is called from async
-        tokio::task::spawn_blocking({
-            let internals = Arc::clone(internals);
-            move || {
-                let mut internals = internals
-                    .lock()
-                    .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+        // Extract stdout_reader Arc WITHOUT holding the main lock
+        let stdout_reader_arc = {
+            let internals = internals
+                .lock()
+                .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+            Arc::clone(&internals.stdout_reader)
+        };
 
-                // Use the persistent BufReader
-                if let Some(ref mut reader) = internals.stdout_reader {
-                    let mut line = String::new();
+        // Now do the blocking read holding ONLY the stdout_reader lock, not the main internals lock
+        tokio::task::spawn_blocking(move || {
+            let mut stdout_guard = stdout_reader_arc
+                .lock()
+                .map_err(|e| format!("Failed to acquire stdout lock: {}", e))?;
 
-                    match reader.read_line(&mut line) {
-                        Ok(0) => Ok(None), // EOF
-                        Ok(_) => {
-                            if line.trim().is_empty() {
-                                return Ok(None);
-                            }
+            // Use the persistent BufReader
+            if let Some(ref mut reader) = *stdout_guard {
+                let mut line = String::new();
 
-                            let event: PythonEvent = serde_json::from_str(&line)
-                                .map_err(|e| format!("Failed to parse event JSON '{}': {}", line.trim(), e))?;
-                            Ok(Some(event))
+                match reader.read_line(&mut line) {
+                    Ok(0) => Ok(None), // EOF
+                    Ok(_) => {
+                        if line.trim().is_empty() {
+                            return Ok(None);
                         }
-                        Err(e) => Err(format!("Failed to read line: {}", e)),
+
+                        let event: PythonEvent = serde_json::from_str(&line)
+                            .map_err(|e| format!("Failed to parse event JSON '{}': {}", line.trim(), e))?;
+                        Ok(Some(event))
                     }
-                } else {
-                    Err("Python process stdout reader not available".to_string())
+                    Err(e) => Err(format!("Failed to read line: {}", e)),
                 }
+            } else {
+                Err("Python process stdout reader not available".to_string())
             }
         })
         .await
@@ -443,13 +566,20 @@ impl PythonProcess {
     /// * `Ok(None)` if no event available or EOF
     /// * `Err(String)` if read failed
     pub fn read_event(&self) -> Result<Option<PythonEvent>, String> {
-        let mut internals = self
-            .internals
-            .lock()
-            .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+        let stdout_reader_arc = {
+            let internals = self
+                .internals
+                .lock()
+                .map_err(|e| format!("Failed to acquire lock: {}", e))?;
+            Arc::clone(&internals.stdout_reader)
+        };
 
         // Use the persistent BufReader
-        if let Some(ref mut reader) = internals.stdout_reader {
+        let mut stdout_guard = stdout_reader_arc
+            .lock()
+            .map_err(|e| format!("Failed to acquire stdout lock: {}", e))?;
+
+        if let Some(ref mut reader) = *stdout_guard {
             let mut line = String::new();
 
             match reader.read_line(&mut line) {
@@ -518,7 +648,7 @@ impl PythonProcess {
             }
 
             // Clean up reader
-            internals.stdout_reader = None;
+            *internals.stdout_reader.lock().unwrap() = None;
             internals.state = ProcessState::Idle;
         }
 
@@ -529,7 +659,15 @@ impl PythonProcess {
 
 impl Drop for PythonProcess {
     fn drop(&mut self) {
-        let _ = self.stop();
+        // Only stop the process if this is the last reference to it
+        // This prevents stopping the process when temporary clones go out of scope
+        if Arc::strong_count(&self.internals) == 1 {
+            eprintln!("[INFO] Last PythonProcess reference dropped, stopping process");
+            let _ = self.stop();
+        } else {
+            eprintln!("[DEBUG] PythonProcess reference dropped, but {} other references remain",
+                Arc::strong_count(&self.internals) - 1);
+        }
     }
 }
 
