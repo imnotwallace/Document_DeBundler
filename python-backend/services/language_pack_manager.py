@@ -216,19 +216,20 @@ class LanguagePackManager:
                     message=f"Downloading {lang_pack.script_model.script_name} models{version_str} (this may take a few minutes)..."
                 ))
 
-            # Initialize PaddleOCR with explicit model names to download specific version
-            # PaddleOCR 3.x supports det_model_name and rec_model_name parameters
+            # Initialize PaddleOCR with lang parameter to trigger auto-download
+            # PaddleOCR 3.x auto-downloads models based on language code
             rec_model_name = lang_pack.get_recognition_model_name()
             det_model_name = lang_pack.detection_model_name
             
-            logger.info(f"Downloading PaddleOCR models for {language_code}:")
-            logger.info(f"  - Detection: {det_model_name}")
-            logger.info(f"  - Recognition: {rec_model_name}")
+            logger.info(f"Downloading PaddleOCR models for language: {language_code}")
+            logger.info(f"  - Expected detection: {det_model_name}")
+            logger.info(f"  - Expected recognition: {rec_model_name}")
+            logger.warning(f"NOTE: PaddleOCR may auto-select mobile version regardless of requested '{version}' version")
             
-            # Initialize with explicit model names - triggers auto-download
+            # Initialize with lang only - triggers auto-download
+            # LIMITATION: PaddleOCR 3.x may not respect version preference during download
             ocr = PaddleOCR(
-                det_model_name=det_model_name,
-                rec_model_name=rec_model_name,
+                lang=language_code,
                 device='cpu',  # Use CPU for download
                 show_log=True  # Show download progress
             )
