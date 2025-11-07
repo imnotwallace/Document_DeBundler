@@ -225,7 +225,7 @@ class LanguagePackManager:
             ocr = PaddleOCR(
                 lang=language_code,
                 rec_model_name=rec_model_name,
-                use_gpu=False  # Use CPU for download to avoid GPU initialization issues
+                device='cpu'  # Use CPU for download to avoid GPU initialization issues
             )
 
             # Verify models were downloaded
