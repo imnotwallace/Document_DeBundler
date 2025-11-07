@@ -104,7 +104,9 @@ class LanguagePackManager:
         statuses = []
         for lang_pack in get_all_languages():
             detection_installed = check_model_installed(lang_pack.detection_model_name)
-            recognition_installed = check_model_installed(lang_pack.script_model.model_name)
+            # Use the method to get the correct model name (server or mobile)
+            recognition_model_name = lang_pack.get_recognition_model_name()
+            recognition_installed = check_model_installed(recognition_model_name)
 
             status = LanguageStatus(
                 code=lang_pack.code,
@@ -114,7 +116,10 @@ class LanguagePackManager:
                 script_description=lang_pack.script_model.description,
                 total_size_mb=lang_pack.total_size_mb,
                 detection_installed=detection_installed,
-                recognition_installed=recognition_installed
+                recognition_installed=recognition_installed,
+                model_version=lang_pack.model_version,
+                has_server_version=lang_pack.can_use_server_version(),
+                available_versions=lang_pack.get_available_versions()
             )
             statuses.append(status)
 
