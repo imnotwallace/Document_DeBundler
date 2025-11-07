@@ -134,8 +134,9 @@ export function setupDownloadProgressListener(): void {
     }
 
     // Setup new listener
-    listen<DownloadProgress>('language-download-progress', (event) => {
-        const progress = event.payload;
+    listen<{ type: string; data: DownloadProgress; request_id?: string }>('language-download-progress', (event) => {
+        // Extract progress from the data field (Rust sends PythonEvent wrapper)
+        const progress = event.payload.data;
 
         console.log(
             `[${progress.language}] ${progress.phase}: ${progress.message} (${progress.progress_percent.toFixed(1)}%)`

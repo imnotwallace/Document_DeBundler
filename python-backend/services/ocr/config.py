@@ -370,8 +370,8 @@ def get_adaptive_dpi(
     Calculate adaptive DPI based on available hardware and quality target.
     
     IMPORTANT: Automatically adjusts for preprocessing memory overhead.
-    - Without preprocessing: 2 images per page
-    - With preprocessing: 3 images per page (original + deskewed + fully preprocessed)
+    - Without preprocessing: 1 image per page (original)
+    - With preprocessing: 2 images per page (deskewed + fully preprocessed)
     - PP-OCRv5 server models use 4-5x more VRAM than mobile models
     
     Args:
@@ -435,16 +435,18 @@ def get_adaptive_dpi(
 
     # Apply preprocessing memory multiplier if enabled
     if preprocessing_enabled:
-        # Memory footprint increases from 2 images to 3 images per page
-        # Reduction factor: 0.57 (same as batch size adjustment)
-        # This means we can safely use ~57% of the DPI we'd normally support
-        multiplier = 0.57
+        # Memory footprint increases from 1 image to 2 images per page
+        # OPTIMIZED: Original images eliminated, only deskewed + preprocessed kept
+        # Deskewed (RGB): ~7.5 MB, Preprocessed (grayscale): ~2.5 MB = 10 MB total
+        # Without preprocessing: ~7.5 MB (original only)
+        # Reduction factor: 7.5 / 10 = 0.75 (~25% reduction)
+        multiplier = 0.75
         max_dpi = int(max_dpi * multiplier)
         
         import logging
         logger = logging.getLogger(__name__)
         logger.debug(
-            f"Adjusted max DPI for 3-image preprocessing pipeline: "
+            f"Adjusted max DPI for 2-image preprocessing pipeline: "
             f"{int(max_dpi / multiplier)} → {max_dpi} ({multiplier:.0%} multiplier)"
         )
 
@@ -472,7 +474,7 @@ def get_adaptive_dpi(
         logger.warning(
             f"Requested DPI ({base_dpi}) reduced to {recommended_dpi} due to memory constraints. "
             f"Available: {'GPU ' + str(gpu_memory_gb) + 'GB VRAM' if use_gpu else 'CPU ' + str(system_memory_gb) + 'GB RAM'}"
-            f"{' (3-image preprocessing enabled)' if preprocessing_enabled else ''}"
+            f"{' (2-image preprocessing enabled)' if preprocessing_enabled else ''}"
         )
     
     return recommended_dpi

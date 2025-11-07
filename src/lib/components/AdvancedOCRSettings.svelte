@@ -27,11 +27,9 @@
   const DEFAULT_DPI = 300;
   const MIN_DPI = 250;
 
-  // Initialize on mount - load hardware capabilities and languages
+  // Initialize on mount - load languages only (hardware detection is lazy, happens when modal opens)
   onMount(async () => {
-    console.log('[AdvancedOCRSettings] Component mounted, loading hardware capabilities and languages');
-    // Load hardware capabilities once when component mounts
-    loadSystemRecommendations();
+    console.log('[AdvancedOCRSettings] Component mounted');
 
     // Load available languages if not already loaded
     if ($availableLanguages.length === 0 && !$isLoadingLanguages) {

@@ -25,6 +25,7 @@ class IPCHandler:
         self.running = True
         self.cancelled = False
         self.current_request_id = None
+        self._hardware_cache = None  # Cache for hardware capabilities (avoid 20s CUDA init on every call)
 
     def send_event(self, event_type: str, data: Any, request_id: str = None):
         """Send an event to the frontend via stdout"""
@@ -573,14 +574,27 @@ class IPCHandler:
         try:
             from services.ocr.config import detect_hardware_capabilities, get_optimal_batch_size, get_adaptive_dpi, detect_model_type
 
-            logger.info("Detecting hardware capabilities...")
+            # Use cached hardware info if available (avoids 20s CUDA initialization on every call)
+            if self._hardware_cache is not None:
+                logger.info("Using cached hardware capabilities")
+                capabilities = self._hardware_cache['capabilities']
+                model_type = self._hardware_cache['model_type']
+            else:
+                logger.info("Detecting hardware capabilities (first time - may take 15-20 seconds)...")
 
-            # Detect hardware
-            capabilities = detect_hardware_capabilities()
+                # Detect hardware (slow on first call due to PyTorch/CUDA init)
+                capabilities = detect_hardware_capabilities()
 
-            # Detect model type
-            model_type = detect_model_type()
-            
+                # Detect model type
+                model_type = detect_model_type()
+
+                # Cache the results
+                self._hardware_cache = {
+                    'capabilities': capabilities,
+                    'model_type': model_type
+                }
+                logger.info("Hardware capabilities cached for future requests")
+
             # Calculate optimal batch size
             gpu_batch_size = get_optimal_batch_size(
                 use_gpu=True,

@@ -257,9 +257,9 @@ class LanguagePackManager:
             dummy_image = np.ones((100, 100, 3), dtype=np.uint8) * 255
             dummy_image[40:45, 20:80] = 0  # Horizontal line (simulates text)
             dummy_image[55:60, 20:80] = 0  # Another line
-            
+
             # Run OCR on dummy image - this completes model download and verifies it works
-            result = ocr_service.process_image(dummy_image)
+            result = ocr_service.extract_text_from_array(dummy_image)
             logger.info(f"Test OCR completed successfully for {language_code}")
             
             # Cleanup

@@ -86,6 +86,15 @@ python-backend/models/cls/*.json
 python-backend/models/*.tar
 python-backend/models/temp_extract/
 
+# PaddleOCR 3.x auto-downloaded models (language-specific directories)
+python-backend/models/ch_det/
+python-backend/models/ch_rec/
+python-backend/models/en_det/
+python-backend/models/en_rec/
+python-backend/models/latin_rec/
+python-backend/models/ml_det/
+python-backend/models/*/
+
 # Embedding Models (auto-downloaded or user-provided)
 # Keep directory structure but ignore model files
 python-backend/models/embeddings/text/

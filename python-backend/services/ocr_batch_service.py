@@ -243,8 +243,8 @@ class OCRBatchService:
         Detect optimal batch size based on GPU VRAM and system RAM.
         
         Automatically adjusts for preprocessing pipeline memory overhead:
-        - Without preprocessing: 2 images per page (original + preprocessed)
-        - With preprocessing: 3 images per page (original + deskewed + fully preprocessed)
+        - Without preprocessing: 1 image per page (original only)
+        - With preprocessing: 2 images per page (deskewed + fully preprocessed, original eliminated)
         
         Returns:
             Optimal batch size for current hardware
@@ -265,16 +265,17 @@ class OCRBatchService:
         
         # Apply memory multiplier if preprocessing is enabled
         if self.config.enable_intelligent_preprocessing:
-            # Memory footprint increases from 2 images to 3 images per page
-            # Original: 2 images = 10 MB per page (7.5 MB RGB + 2.5 MB grayscale)
-            # With preprocessing: 3 images = 17.5 MB per page (7.5 + 7.5 + 2.5)
-            # Reduction factor: 10 / 17.5 = 0.57 (reduce batch by ~43%)
-            memory_multiplier = 0.57
+            # Memory footprint increases from 1 image to 2 images per page
+            # OPTIMIZED: Original images eliminated, only deskewed + preprocessed kept
+            # Without preprocessing: 1 image = 7.5 MB per page (original RGB only)
+            # With preprocessing: 2 images = 10 MB per page (7.5 MB deskewed RGB + 2.5 MB preprocessed grayscale)
+            # Reduction factor: 7.5 / 10 = 0.75 (~25% reduction)
+            memory_multiplier = 0.75
             adjusted_batch_size = max(1, int(base_batch_size * memory_multiplier))
             
             logger.info(
                 f"Detected optimal batch size: {base_batch_size} (base) → "
-                f"{adjusted_batch_size} (adjusted for 3-image preprocessing pipeline, "
+                f"{adjusted_batch_size} (adjusted for 2-image preprocessing pipeline, "
                 f"{memory_multiplier:.0%} multiplier)"
             )
             return adjusted_batch_size
@@ -1044,26 +1045,25 @@ class OCRBatchService:
         # Normal batch processing
         def process_batch_operation():
             # Render pages to images FROM ORIGINAL PDF
-            # IMPORTANT: These original images will be used for overlay strategy
-            original_images = []
-            for page_num in page_numbers:
-                image = pdf.render_page_to_image(page_num, dpi=300)
-                original_images.append(image)
-
-            # STEP 1: Apply DESKEW if preprocessing enabled (visual improvement)
-            # Deskewed images will be used for "full rebuild" final output
+            # Then immediately apply deskew (visual improvement for final output)
+            # OPTIMIZATION: We skip keeping original images separately since deskewed
+            # serves as the base for both "overlay" and "full rebuild" strategies
             deskewed_images = []
-            if self.preprocessor is not None:
-                logger.debug(f"Applying deskew to {len(original_images)} images (for full rebuild output)")
-                for idx, img in enumerate(original_images):
-                    # Only apply deskew (visual improvement, appropriate for final output)
-                    deskewed = self._apply_deskew_only(img)
+            for page_num in page_numbers:
+                # Render from PDF
+                image = pdf.render_page_to_image(page_num, dpi=300)
+                
+                # Apply deskew if preprocessing enabled
+                if self.preprocessor is not None:
+                    deskewed = self._apply_deskew_only(image)
                     deskewed_images.append(deskewed)
-                    if deskewed is not img:  # Check if deskew was actually applied
-                        logger.debug(f"Page {page_numbers[idx]+1}: Deskewed for visual improvement")
-            else:
-                # No preprocessing - deskewed = original
-                deskewed_images = [img.copy() for img in original_images]
+                    # Free original image immediately
+                    del image
+                    if deskewed is not deskewed_images[-1]:  # Check if deskew was actually applied
+                        logger.debug(f"Page {page_num+1}: Deskewed for visual improvement")
+                else:
+                    # No preprocessing - use original
+                    deskewed_images.append(image)
 
             # STEP 2: Apply FULL PREPROCESSING to deskewed images (OCR quality)
             # This includes denoise, sharpen, contrast, binarize - NOT for final output!
@@ -1091,8 +1091,8 @@ class OCRBatchService:
                     else:
                         logger.debug(f"Page {page_numbers[idx]+1}: Using deskewed only for OCR (preprocessing rejected)")
             else:
-                # No preprocessing - use originals
-                images_for_ocr = [img.copy() for img in original_images]
+                # No preprocessing - use deskewed images
+                images_for_ocr = [img.copy() for img in deskewed_images]
                 for img in images_for_ocr:
                     image_dimensions.append({
                         'width': img.shape[1],
@@ -1120,20 +1120,22 @@ class OCRBatchService:
                 ocr_result.image_height = dims['height']
 
             # Cleanup fully preprocessed images (no longer needed)
-            # IMPORTANT: We keep original_images and deskewed_images for final PDF output
+            # IMPORTANT: We only keep deskewed_images for final PDF output
             del images_for_ocr
 
-            # Return OCR results WITH original and deskewed images for final output
-            return ocr_results, original_images, deskewed_images
+            # Return OCR results WITH deskewed images for final output
+            # OPTIMIZED: Only 2 images per page instead of 3 (original eliminated)
+            return ocr_results, deskewed_images
 
         # Execute with retry
-        ocr_results, original_images, deskewed_images = self._retry_with_backoff(
+        ocr_results, deskewed_images = self._retry_with_backoff(
             process_batch_operation,
             f"OCR batch ({len(page_numbers)} pages from {file_name})"
         )
 
         # VALIDATE AND RETRY
-        # Results now include: (text, ocr_result, original_image, deskewed_image)
+        # Results now include: (text, ocr_result, deskewed_image)
+        # OPTIMIZED: Only 2 images per page (original eliminated)
         validated_results = []
         for idx, (page_num, ocr_result) in enumerate(zip(page_numbers, ocr_results)):
             text = ocr_result.text
@@ -1145,11 +1147,10 @@ class OCRBatchService:
             is_valid, reason = self._validate_ocr_output(text, page_num)
 
             if is_valid:
-                # Include original and deskewed images with result
+                # Include deskewed image with result (original eliminated)
                 validated_results.append((
                     text, 
                     ocr_result,
-                    original_images[idx],
                     deskewed_images[idx]
                 ))
                 logger.debug(f"Page {page_num+1}: OCR valid ({len(text)} chars) - {reason}")
@@ -1173,7 +1174,6 @@ class OCRBatchService:
                     validated_results.append((
                         retry_text, 
                         retry_result,
-                        original_images[idx],
                         deskewed_images[idx]
                     ))
                     logger.info(f"Page {page_num+1}: Retry succeeded with {method}")
@@ -1187,12 +1187,10 @@ class OCRBatchService:
                     validated_results.append((
                         "", 
                         empty_result,
-                        original_images[idx],
                         deskewed_images[idx]
                     ))
 
         # Cleanup images after validation
-        del original_images
         del deskewed_images
         
         return validated_results
@@ -1212,21 +1210,24 @@ class OCRBatchService:
             file_name: Name of file being processed (for logging)
 
         Returns:
-            Tuple of (text, ocr_result, original_image, deskewed_image)
+            Tuple of (text, ocr_result, deskewed_image)
         """
         def process_page_operation():
             # Render original image
-            original_image = pdf.render_page_to_image(page_num, dpi=300)
+            image = pdf.render_page_to_image(page_num, dpi=300)
             
             # Apply deskew if preprocessing enabled
             if self.preprocessor is not None:
-                deskewed_image = self._apply_deskew_only(original_image)
+                deskewed_image = self._apply_deskew_only(image)
+                # Free original immediately (no longer needed)
+                del image
                 # Apply full preprocessing for OCR
                 preprocess_result = self.preprocessor.process(deskewed_image)
                 image_for_ocr = preprocess_result.image if preprocess_result.used_preprocessed else deskewed_image
             else:
-                deskewed_image = original_image.copy()
-                image_for_ocr = original_image.copy()
+                deskewed_image = image.copy()
+                image_for_ocr = image.copy()
+                del image
             
             # Get full OCR result with bounding boxes
             ocr_results = self.ocr_service.process_batch_with_boxes([image_for_ocr])
@@ -1239,23 +1240,23 @@ class OCRBatchService:
             # Cleanup OCR image
             del image_for_ocr
             
-            # Return OCR result with original and deskewed images
-            return (ocr_results[0] if ocr_results else None, original_image, deskewed_image)
+            # Return OCR result with deskewed image (original eliminated)
+            return (ocr_results[0] if ocr_results else None, deskewed_image)
 
         try:
-            ocr_result, original_img, deskewed_img = self._retry_with_backoff(
+            ocr_result, deskewed_img = self._retry_with_backoff(
                 process_page_operation,
                 f"OCR page {page_num + 1} from {file_name}"
             )
             
             if ocr_result:
-                return (ocr_result.text, ocr_result, original_img, deskewed_img)
+                return (ocr_result.text, ocr_result, deskewed_img)
             else:
                 from .ocr.base import OCRResult
                 empty_result = OCRResult(text="", confidence=0.0, error="No OCR result")
                 empty_result.image_width = None
                 empty_result.image_height = None
-                return ("", empty_result, original_img, deskewed_img)
+                return ("", empty_result, deskewed_img)
                 
         except Exception as e:
             logger.error(f"Failed to process page {page_num + 1} after retries: {e}")
@@ -1263,9 +1264,9 @@ class OCRBatchService:
             empty_result = OCRResult(text="", confidence=0.0, error=str(e))
             empty_result.image_width = None
             empty_result.image_height = None
-            # Return empty images as well
+            # Return empty image as well
             empty_img = np.zeros((100, 100, 3), dtype=np.uint8)
-            return ("", empty_result, empty_img, empty_img)  # Return empty string on failure
+            return ("", empty_result, empty_img)  # Return empty string on failure
 
     def _process_single_file(
         self,
@@ -1370,14 +1371,14 @@ class OCRBatchService:
                             message=f"File {file_idx}/{total_files}: {file_name} - OCR batch {batch_start_idx + 1}-{batch_end_idx}/{len(pages_needing_ocr)}"
                         )
 
-                        # Process batch - returns (text, ocr_result, original_image, deskewed_image) tuples
+                        # Process batch - returns (text, ocr_result, deskewed_image) tuples
                         batch_results = self._process_page_batch(pdf, batch_page_nums, file_name)
 
                         # Store results and track success/failure
-                        for page_num, (text, ocr_result, original_img, deskewed_img) in zip(batch_page_nums, batch_results):
-                            # Always store the result with images for final output
-                            # Format: (text, ocr_result, original_image, deskewed_image)
-                            page_texts[page_num] = (text, ocr_result, original_img, deskewed_img)
+                        for page_num, (text, ocr_result, deskewed_img) in zip(batch_page_nums, batch_results):
+                            # Always store the result with image for final output
+                            # OPTIMIZED: Format is now (text, ocr_result, deskewed_image) - original eliminated
+                            page_texts[page_num] = (text, ocr_result, deskewed_img)
                             if text:  # Track successful OCR
                                 result['pages_ocr'] += 1
                             else:  # Track empty OCR results (blank pages, images, etc.)
@@ -1417,8 +1418,8 @@ class OCRBatchService:
                             if page_num not in page_texts:
                                 continue
 
-                            # Unpack text, OCR result, and images (original + deskewed)
-                            ocr_text, ocr_result, original_img, deskewed_img = page_texts[page_num]
+                            # Unpack text, OCR result, and deskewed image (original eliminated)
+                            ocr_text, ocr_result, deskewed_img = page_texts[page_num]
 
                             # Log if OCR returned empty text, but still process to embed empty layer
                             if not ocr_text:

@@ -8,7 +8,19 @@
   import Button from "./lib/components/shared/Button.svelte";
   import Modal from "./lib/components/shared/Modal.svelte";
   import ProgressBar from "./lib/components/shared/ProgressBar.svelte";
+  import LoadingScreen from "./lib/components/LoadingScreen.svelte";
   import { initializeLanguagePackService } from './lib/services/languagePackService';
+  import { initializeApp, type InitProgress } from './lib/services/appInitService';
+
+  // App initialization state
+  let isInitializing = true;
+  let initProgress: InitProgress = {
+    progress: 0,
+    message: 'Starting...',
+    currentStep: '',
+    totalSteps: 0,
+    completedSteps: 0,
+  };
 
   // Existing state from original App.svelte
   let selectedFile: string | null = null;
@@ -72,23 +84,54 @@
     return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
   }
 
-  // Initialize language pack service on mount
+  // Initialize app on mount
   onMount(async () => {
-    // Initialize language pack service
     try {
-      console.log('Initializing language pack service...');
-      await initializeLanguagePackService();
-      console.log('Language pack service initialized successfully');
+      console.log('Starting app initialization...');
+
+      // Run critical initialization (hardware detection) with loading screen
+      await initializeApp((progress) => {
+        initProgress = progress;
+      });
+
+      console.log('Critical initialization complete, hiding loading screen');
+      isInitializing = false;
+
+      // Load language packs in background (non-blocking)
+      setTimeout(async () => {
+        try {
+          console.log('Loading language packs in background...');
+          await initializeLanguagePackService();
+          console.log('Language pack service initialized successfully');
+        } catch (err) {
+          console.error('Failed to initialize language pack service:', err);
+          // Don't throw - allow app to continue even if language pack service fails
+        }
+      }, 100);
+
     } catch (err) {
-      console.error('Failed to initialize language pack service:', err);
-      // Don't throw - allow app to continue even if language pack service fails
+      console.error('App initialization failed:', err);
+      // Show error but allow app to continue
+      isInitializing = false;
+      alert(`Initialization warning: ${err}\n\nThe app will continue, but some features may not work correctly.`);
     }
   });
 </script>
 
 <main class="w-full h-full">
-  <div class="w-full h-full bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
-    {#if $currentModule === 'main_menu'}
+  {#if isInitializing}
+    <!-- Loading Screen (blocks interaction during initialization) -->
+    <LoadingScreen
+      progress={initProgress.progress}
+      message={initProgress.message}
+      currentStep={initProgress.currentStep}
+      totalSteps={initProgress.totalSteps}
+      completedSteps={initProgress.completedSteps}
+    />
+  {:else}
+    <!-- Main App (shown after initialization) -->
+    <div class="w-full h-full bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+      {#if $currentModule === 'main_menu'}
       <!-- Main Menu Module -->
       <MainMenu />
 
@@ -165,4 +208,5 @@
       </div>
     {/if}
   </div>
+  {/if}
 </main>

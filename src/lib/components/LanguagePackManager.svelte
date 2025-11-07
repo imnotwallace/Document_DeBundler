@@ -196,16 +196,16 @@
                 <div class="version-status-container">
                   <span class="version-status-label">Installed:</span>
                   <span class="version-status-badge" class:installed={lang.mobile_installed} class:not-installed={!lang.mobile_installed}>
-                    Mobile {lang.mobile_installed ? 'Yes' : 'No'}
+                    Mobile {lang.mobile_installed ? '✓' : '✗'}
                   </span>
                   <span class="version-status-badge" class:installed={lang.server_installed} class:not-installed={!lang.server_installed}>
-                    Server {lang.server_installed ? 'Yes' : 'No'}
+                    Server {lang.server_installed ? '✓' : '✗'}
                   </span>
                 </div>
               {:else}
                 <!-- Only mobile version available -->
                 <span class="version-status-badge" class:installed={lang.mobile_installed} class:not-installed={!lang.mobile_installed}>
-                  Mobile {lang.mobile_installed ? 'Yes' : 'No'}
+                  Mobile {lang.mobile_installed ? '✓' : '✗'}
                 </span>
               {/if}
             </div>
