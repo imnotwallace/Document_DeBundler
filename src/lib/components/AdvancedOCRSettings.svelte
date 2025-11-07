@@ -291,6 +291,15 @@
   function getSelectedModeInfo() {
     return processingModes.find(m => m.value === localConfig.processingMode);
   }
+
+  /**
+   * Handle language and version selection
+   */
+  function handleLanguageVersionChange(value: string) {
+    const [langCode, version] = value.split('|');
+    localConfig.languages[0] = langCode;
+    localConfig.modelVersion = version as 'server' | 'mobile';
+  }
 </script>
 
 <Modal {isOpen} {onClose} title="Advanced OCR Settings">
@@ -314,12 +323,7 @@
       <select
         id="language"
         class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-        on:change={(e) => {
-          const value = e.currentTarget.value;
-          const [langCode, version] = value.split('|');
-          localConfig.languages[0] = langCode;
-          localConfig.modelVersion = version as 'server' | 'mobile';
-        }}
+        on:change={(e) => handleLanguageVersionChange(e.currentTarget.value)}
       >
         {#each $availableLanguages as lang}
           <!-- Show mobile version option -->
