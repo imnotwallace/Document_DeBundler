@@ -161,10 +161,11 @@ class LanguagePackManager:
         progress_callback: Optional[Callable[[DownloadProgress], None]] = None
     ) -> bool:
         """
-        Trigger PaddleOCR to download models for a language with a specific version.
-
-        This initializes PaddleOCR with the specified language and version, which triggers
-        automatic model download from Hugging Face if models aren't already installed.
+        Trigger model download by running a test OCR operation.
+        
+        This uses the actual OCR engine initialization (which properly supports
+        version selection via rec_model_name) to download models, rather than
+        trying to use PaddleOCR's initialization directly.
 
         Args:
             language_code: Language code to download
@@ -175,6 +176,7 @@ class LanguagePackManager:
             True if successful, False otherwise
         """
         from .language_pack_metadata import get_language_pack_with_version
+        import numpy as np
         
         lang_pack = get_language_pack_with_version(language_code, version)
         if not lang_pack:
@@ -198,13 +200,15 @@ class LanguagePackManager:
                     language_name=lang_pack.name,
                     phase="initializing",
                     progress_percent=0,
-                    message=f"Initializing PaddleOCR for {lang_pack.name}{version_str}..."
+                    message=f"Preparing to download {lang_pack.name}{version_str}..."
                 ))
 
-            # Import PaddleOCR here to avoid startup overhead
-            from paddleocr import PaddleOCR
-
-            logger.info(f"Initializing PaddleOCR for language: {language_code} (version: {version})")
+            rec_model_name = lang_pack.get_recognition_model_name()
+            det_model_name = lang_pack.detection_model_name
+            
+            logger.info(f"Downloading models via OCR test for language: {language_code} (version: {version})")
+            logger.info(f"  - Detection: {det_model_name}")
+            logger.info(f"  - Recognition: {rec_model_name}")
 
             if progress_callback:
                 version_str = f" ({version} version)" if lang_pack.can_use_server_version() else ""
@@ -212,40 +216,75 @@ class LanguagePackManager:
                     language=language_code,
                     language_name=lang_pack.name,
                     phase="downloading",
-                    progress_percent=50,
-                    message=f"Downloading {lang_pack.script_model.script_name} models{version_str} (this may take a few minutes)..."
+                    progress_percent=30,
+                    message=f"Downloading {lang_pack.script_model.script_name} models{version_str}..."
                 ))
 
-            # Initialize PaddleOCR with lang parameter to trigger auto-download
-            # PaddleOCR 3.x auto-downloads models based on language code
-            rec_model_name = lang_pack.get_recognition_model_name()
-            det_model_name = lang_pack.detection_model_name
+            # Import OCR service to use real OCR engine
+            from .ocr_service import OCRService
+            from .ocr.base import OCRConfig
             
-            logger.info(f"Downloading PaddleOCR models for language: {language_code}")
-            logger.info(f"  - Expected detection: {det_model_name}")
-            logger.info(f"  - Expected recognition: {rec_model_name}")
-            logger.warning(f"NOTE: PaddleOCR may auto-select mobile version regardless of requested '{version}' version")
-            
-            # Initialize with lang only - triggers auto-download
-            # LIMITATION: PaddleOCR 3.x may not respect version preference during download
-            ocr = PaddleOCR(
-                lang=language_code,
-                device='cpu',  # Use CPU for download
-                show_log=True  # Show download progress
+            # Create OCR config with specific language and version
+            ocr_config = OCRConfig(
+                languages=[language_code],
+                model_version=version,
+                use_gpu=False,  # Use CPU for download to avoid GPU issues
+                enable_angle_classification=False
             )
+            
+            if progress_callback:
+                progress_callback(DownloadProgress(
+                    language=language_code,
+                    language_name=lang_pack.name,
+                    phase="downloading",
+                    progress_percent=50,
+                    message=f"Initializing OCR engine (this will download models if needed)..."
+                ))
+            
+            # Initialize OCR service - this will download models if not present
+            ocr_service = OCRService(config=ocr_config)
+            
+            if progress_callback:
+                progress_callback(DownloadProgress(
+                    language=language_code,
+                    language_name=lang_pack.name,
+                    phase="downloading",
+                    progress_percent=70,
+                    message=f"Running verification test..."
+                ))
+            
+            # Create a small dummy image for test (100x100 white with black text-like features)
+            dummy_image = np.ones((100, 100, 3), dtype=np.uint8) * 255
+            dummy_image[40:45, 20:80] = 0  # Horizontal line (simulates text)
+            dummy_image[55:60, 20:80] = 0  # Another line
+            
+            # Run OCR on dummy image - this completes model download and verifies it works
+            result = ocr_service.process_image(dummy_image)
+            logger.info(f"Test OCR completed successfully for {language_code}")
+            
+            # Cleanup
+            ocr_service.cleanup()
+            
+            if progress_callback:
+                progress_callback(DownloadProgress(
+                    language=language_code,
+                    language_name=lang_pack.name,
+                    phase="downloading",
+                    progress_percent=90,
+                    message=f"Verifying installation..."
+                ))
 
             # Verify models were downloaded
-            detection_model_name = lang_pack.detection_model_name
-            detection_exists = check_model_installed(detection_model_name)
+            detection_exists = check_model_installed(det_model_name)
             recognition_exists = check_model_installed(rec_model_name)
             
-            logger.info(f"Verification - Detection model ({detection_model_name}): {detection_exists}")
+            logger.info(f"Verification - Detection model ({det_model_name}): {detection_exists}")
             logger.info(f"Verification - Recognition model ({rec_model_name}): {recognition_exists}")
             
             if not detection_exists:
-                raise Exception(f"Detection model not found: {detection_model_name}")
+                raise Exception(f"Detection model not found after download: {det_model_name}")
             if not recognition_exists:
-                raise Exception(f"Recognition model not found: {rec_model_name}")
+                raise Exception(f"Recognition model not found after download: {rec_model_name}")
 
             if progress_callback:
                 version_str = f" ({version} version)" if lang_pack.can_use_server_version() else ""
@@ -262,7 +301,7 @@ class LanguagePackManager:
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Failed to download models for {language_code} ({version}): {error_msg}")
+            logger.error(f"Failed to download models for {language_code} ({version}): {error_msg}", exc_info=True)
 
             if progress_callback:
                 progress_callback(DownloadProgress(
