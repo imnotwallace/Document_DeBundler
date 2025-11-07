@@ -188,11 +188,10 @@ class LanguagePackManager:
                 ))
 
             # Initialize PaddleOCR with the language - this triggers auto-download
-            # For languages with server versions, we need to specify the model explicitly
-            recognition_model_name = lang_pack.get_recognition_model_name()
-            
-            # Initialize with language code (PaddleOCR will auto-download the appropriate model)
-            ocr = PaddleOCR(lang=language_code, rec_model_dir=recognition_model_name)
+            # Note: PaddleOCR 3.x auto-selects models based on language code
+            # We cannot directly specify server vs mobile version during download
+            logger.info(f"Note: PaddleOCR will auto-select model version for {language_code}")
+            ocr = PaddleOCR(lang=language_code)
 
             # Verify models were downloaded
             lang_pack_updated = get_language_pack_with_version(language_code, version)
