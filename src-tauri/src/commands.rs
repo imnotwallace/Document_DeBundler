@@ -63,6 +63,12 @@ pub struct LanguageInfo {
     pub total_size_mb: f32,
     pub detection_installed: bool,
     pub recognition_installed: bool,
+    #[serde(default)]
+    pub model_version: Option<String>,  // "server" or "mobile" - currently selected version
+    #[serde(default)]
+    pub has_server_version: Option<bool>,  // Whether server version is available
+    #[serde(default)]
+    pub available_versions: Option<Vec<String>>,  // List of available versions
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -766,11 +772,12 @@ pub async fn get_language_status(
 #[tauri::command]
 pub async fn download_language_pack(
     language_code: String,
+    version: Option<String>,  // "server" or "mobile"
     enable_angle_classification: Option<bool>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DownloadResponse, String> {
-    eprintln!("[DEBUG] download_language_pack called for language: {}", language_code);
+    eprintln!("[DEBUG] download_language_pack called for language: {} (version: {:?})", language_code, version);
 
     // Ensure Python process is started
     eprintln!("[DEBUG] Checking if Python process is started...");
@@ -805,6 +812,7 @@ pub async fn download_language_pack(
         file_path: None,
         options: Some(serde_json::json!({
             "language_code": language_code,
+            "version": version.unwrap_or("mobile".to_string()),  // Default to mobile if not specified
             "enable_angle_classification": enable_angle_classification.unwrap_or(false)
         })),
         request_id: None, // Will be set by send_command_and_wait
