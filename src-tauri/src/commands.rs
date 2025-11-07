@@ -57,18 +57,22 @@ pub struct ProcessingStatus {
 pub struct LanguageInfo {
     pub code: String,
     pub name: String,
-    pub installed: bool,
+    pub installed: bool,  // True if ANY version is installed
     pub script_name: String,  // e.g., "latin", "arabic", "cyrillic"
     pub script_description: String,  // Description of what languages use this script
     pub total_size_mb: f32,
     pub detection_installed: bool,
-    pub recognition_installed: bool,
+    pub recognition_installed: bool,  // For current model_version
     #[serde(default)]
     pub model_version: Option<String>,  // "server" or "mobile" - currently selected version
     #[serde(default)]
     pub has_server_version: Option<bool>,  // Whether server version is available
     #[serde(default)]
     pub available_versions: Option<Vec<String>>,  // List of available versions
+    #[serde(default)]
+    pub server_installed: Option<bool>,  // Whether server version is installed
+    #[serde(default)]
+    pub mobile_installed: Option<bool>,  // Whether mobile version is installed
 }
 
 #[derive(Debug, Serialize, Deserialize)]

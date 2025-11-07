@@ -13,15 +13,17 @@ import type { Writable, Readable } from 'svelte/store';
 export interface LanguagePackInfo {
     code: string;
     name: string;
-    installed: boolean;
+    installed: boolean;  // True if ANY version is installed
     script_name: string;  // e.g., "latin", "arabic", "cyrillic"
     script_description: string;  // Description of what languages use this script
     total_size_mb: number;
     detection_installed: boolean;
-    recognition_installed: boolean;
+    recognition_installed: boolean;  // For current model_version
     model_version?: string;  // "server" or "mobile" - currently selected version
     has_server_version?: boolean;  // Whether server version is available
     available_versions?: string[];  // List of available versions
+    server_installed?: boolean;  // Whether server version is installed
+    mobile_installed?: boolean;  // Whether mobile version is installed
 }
 
 export interface DownloadProgress {

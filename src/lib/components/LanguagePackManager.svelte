@@ -190,36 +190,36 @@
             <div class="language-details">
               <span class="language-size">{formatSize(lang.total_size_mb)}</span>
               <span class="detail-badge">{lang.script_name} script</span>
-              
-              {#if lang.has_server_version && !lang.installed}
-                <div class="version-selector">
-                  <label class="version-label">
-                    <span class="version-label-text">Version:</span>
-                    <select 
-                      class="version-select"
-                      value={getSelectedVersion(lang.code)}
-                      on:change={(e) => handleVersionChange(lang.code, e.currentTarget.value)}
-                    >
-                      <option value="server">Server (Accurate)</option>
-                      <option value="mobile">Mobile (Fast)</option>
-                    </select>
-                  </label>
+
+              <!-- Per-version installation status -->
+              {#if lang.has_server_version}
+                <div class="version-status-container">
+                  <span class="version-status-label">Installed:</span>
+                  <span class="version-status-badge" class:installed={lang.mobile_installed} class:not-installed={!lang.mobile_installed}>
+                    Mobile {lang.mobile_installed ? '✓' : '✗'}
+                  </span>
+                  <span class="version-status-badge" class:installed={lang.server_installed} class:not-installed={!lang.server_installed}>
+                    Server {lang.server_installed ? '✓' : '✗'}
+                  </span>
                 </div>
-              {:else if lang.has_server_version && lang.installed}
-                <span class="version-badge">{lang.model_version || 'mobile'}</span>
+              {:else}
+                <!-- Only mobile version available -->
+                <span class="version-status-badge" class:installed={lang.mobile_installed} class:not-installed={!lang.mobile_installed}>
+                  Mobile {lang.mobile_installed ? '✓' : '✗'}
+                </span>
               {/if}
             </div>
           </div>
 
           <!-- Status / Actions -->
           <div class="language-actions">
-            {#if lang.installed}
-              <!-- Installed -->
+            {#if lang.mobile_installed && lang.server_installed}
+              <!-- Both versions installed -->
               <div class="status-badge installed">
                 <svg class="status-icon" viewBox="0 0 20 20" fill="currentColor">
                   <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd" />
                 </svg>
-                <span>Installed</span>
+                <span>Both Installed</span>
               </div>
             {:else if progress}
               <!-- Downloading -->
@@ -252,17 +252,35 @@
                 {/if}
               </div>
             {:else}
-              <!-- Not Installed -->
-              <button
-                class="download-button"
-                on:click={() => handleDownload(lang.code)}
-                disabled={$hasActiveDownloads}
-              >
-                <svg class="button-icon" viewBox="0 0 20 20" fill="currentColor">
-                  <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
-                </svg>
-                <span>Download</span>
-              </button>
+              <!-- Partial or no installation - show version selector and download -->
+              <div class="partial-install-actions">
+                {#if lang.has_server_version}
+                  <!-- Show version selector for languages with both versions -->
+                  <select
+                    class="version-select-action"
+                    value={getSelectedVersion(lang.code)}
+                    on:change={(e) => handleVersionChange(lang.code, e.currentTarget.value)}
+                  >
+                    <option value="mobile" disabled={lang.mobile_installed}>
+                      Mobile {lang.mobile_installed ? '(Installed)' : ''}
+                    </option>
+                    <option value="server" disabled={lang.server_installed}>
+                      Server {lang.server_installed ? '(Installed)' : ''}
+                    </option>
+                  </select>
+                {/if}
+
+                <button
+                  class="download-button"
+                  on:click={() => handleDownload(lang.code)}
+                  disabled={$hasActiveDownloads}
+                >
+                  <svg class="button-icon" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+                  </svg>
+                  <span>Download</span>
+                </button>
+              </div>
             {/if}
           </div>
         </div>
@@ -681,5 +699,63 @@
 
   .help-text p {
     margin: 0;
+  }
+
+  /* Version Status */
+  .version-status-container {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
+  }
+
+  .version-status-label {
+    font-size: 0.75rem;
+    color: #6b7280;
+    font-weight: 500;
+  }
+
+  .version-status-badge {
+    font-size: 0.75rem;
+    padding: 0.125rem 0.5rem;
+    border-radius: 0.25rem;
+    font-weight: 500;
+  }
+
+  .version-status-badge.installed {
+    color: #065f46;
+    background: #d1fae5;
+  }
+
+  .version-status-badge.not-installed {
+    color: #92400e;
+    background: #fef3c7;
+  }
+
+  /* Partial Install Actions */
+  .partial-install-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .version-select-action {
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #d1d5db;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    background: white;
+    cursor: pointer;
+    color: #1f2937;
+  }
+
+  .version-select-action:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+  }
+
+  .version-select-action option:disabled {
+    color: #9ca3af;
   }
 </style>

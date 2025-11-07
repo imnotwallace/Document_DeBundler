@@ -29,15 +29,18 @@ class LanguageStatus:
     """Status of a language pack installation"""
     code: str
     name: str
-    installed: bool
+    installed: bool  # True if ANY version is installed
     script_name: str  # "latin", "arabic", "cyrillic", etc.
     script_description: str
     total_size_mb: float
     detection_installed: bool
-    recognition_installed: bool
+    recognition_installed: bool  # For current model_version
     model_version: str = "mobile"  # "server" or "mobile"
     has_server_version: bool = False  # Whether server version is available
     available_versions: List[str] = None  # List of available versions
+    # NEW: Per-version installation status
+    server_installed: bool = False  # Whether server version is installed
+    mobile_installed: bool = False  # Whether mobile version is installed  # List of available versions
 
 
 @dataclass
@@ -96,22 +99,46 @@ class LanguagePackManager:
 
     def get_all_language_statuses(self) -> List[LanguageStatus]:
         """
-        Get installation status for all languages.
+        Get installation status for all languages with per-version status.
 
         Returns:
             List of LanguageStatus for all available languages
         """
+        from .language_pack_metadata import get_language_pack_with_version
+        
         statuses = []
         for lang_pack in get_all_languages():
             detection_installed = check_model_installed(lang_pack.detection_model_name)
+            
+            # Check installation status for BOTH versions (if available)
+            mobile_installed = False
+            server_installed = False
+            
+            # Always check mobile version
+            mobile_pack = get_language_pack_with_version(lang_pack.code, "mobile")
+            if mobile_pack:
+                mobile_model_name = mobile_pack.get_recognition_model_name()
+                mobile_installed = check_model_installed(mobile_model_name)
+            
+            # Check server version if available
+            if lang_pack.can_use_server_version():
+                server_pack = get_language_pack_with_version(lang_pack.code, "server")
+                if server_pack:
+                    server_model_name = server_pack.get_recognition_model_name()
+                    server_installed = check_model_installed(server_model_name)
+            
+            # Determine which version to report as "current"
             # Use the method to get the correct model name (server or mobile)
             recognition_model_name = lang_pack.get_recognition_model_name()
             recognition_installed = check_model_installed(recognition_model_name)
+            
+            # Language is "installed" if ANY version is installed
+            any_version_installed = mobile_installed or server_installed
 
             status = LanguageStatus(
                 code=lang_pack.code,
                 name=lang_pack.name,
-                installed=lang_pack.installed,
+                installed=any_version_installed,
                 script_name=lang_pack.script_model.script_name,
                 script_description=lang_pack.script_model.description,
                 total_size_mb=lang_pack.total_size_mb,
@@ -119,7 +146,9 @@ class LanguagePackManager:
                 recognition_installed=recognition_installed,
                 model_version=lang_pack.model_version,
                 has_server_version=lang_pack.can_use_server_version(),
-                available_versions=lang_pack.get_available_versions()
+                available_versions=lang_pack.get_available_versions(),
+                server_installed=server_installed,
+                mobile_installed=mobile_installed
             )
             statuses.append(status)
 
