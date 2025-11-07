@@ -216,16 +216,30 @@ class LanguagePackManager:
                     message=f"Downloading {lang_pack.script_model.script_name} models{version_str} (this may take a few minutes)..."
                 ))
 
-            # Initialize PaddleOCR with the language - this triggers auto-download
-            # Note: PaddleOCR 3.x auto-selects models based on language code
-            # We cannot directly specify server vs mobile version during download
-            logger.info(f"Note: PaddleOCR will auto-select model version for {language_code}")
-            ocr = PaddleOCR(lang=language_code)
+            # Initialize PaddleOCR with EXPLICIT model selection - this triggers auto-download
+            # CRITICAL: Must pass rec_model_name to download specific version (server vs mobile)
+            rec_model_name = lang_pack.get_recognition_model_name()
+            logger.info(f"Downloading PaddleOCR models for {language_code}: {rec_model_name}")
+            
+            # Pass rec_model_name to force download of specific version
+            ocr = PaddleOCR(
+                lang=language_code,
+                rec_model_name=rec_model_name,
+                use_gpu=False  # Use CPU for download to avoid GPU initialization issues
+            )
 
             # Verify models were downloaded
-            lang_pack_updated = get_language_pack_with_version(language_code, version)
-            if not lang_pack_updated or not lang_pack_updated.installed:
-                raise Exception("Models did not download successfully")
+            detection_model_name = lang_pack.detection_model_name
+            detection_exists = check_model_installed(detection_model_name)
+            recognition_exists = check_model_installed(rec_model_name)
+            
+            logger.info(f"Verification - Detection model ({detection_model_name}): {detection_exists}")
+            logger.info(f"Verification - Recognition model ({rec_model_name}): {recognition_exists}")
+            
+            if not detection_exists:
+                raise Exception(f"Detection model not found: {detection_model_name}")
+            if not recognition_exists:
+                raise Exception(f"Recognition model not found: {rec_model_name}")
 
             if progress_callback:
                 version_str = f" ({version} version)" if lang_pack.can_use_server_version() else ""

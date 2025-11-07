@@ -497,7 +497,8 @@
 
   .language-details {
     display: flex;
-    gap: 1rem;
+    flex-wrap: wrap;
+    gap: 0.75rem;
     align-items: center;
   }
 
@@ -706,7 +707,6 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-left: auto;
   }
 
   .version-status-label {
