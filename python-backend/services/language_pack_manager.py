@@ -222,15 +222,6 @@ class LanguagePackManager:
 
             # Import OCR service to use real OCR engine
             from .ocr_service import OCRService
-            from .ocr.base import OCRConfig
-            
-            # Create OCR config with specific language and version
-            ocr_config = OCRConfig(
-                languages=[language_code],
-                model_version=version,
-                use_gpu=False,  # Use CPU for download to avoid GPU issues
-                enable_angle_classification=False
-            )
             
             if progress_callback:
                 progress_callback(DownloadProgress(
@@ -242,7 +233,14 @@ class LanguagePackManager:
                 ))
             
             # Initialize OCR service - this will download models if not present
-            ocr_service = OCRService(config=ocr_config)
+            ocr_service = OCRService(
+                gpu=False,  # Use CPU for download to avoid GPU issues
+                engine="paddleocr",  # Force PaddleOCR engine
+                fallback_enabled=False,
+                use_pooling=False,  # Disable pooling for download
+                language=language_code,
+                model_version=version
+            )
             
             if progress_callback:
                 progress_callback(DownloadProgress(

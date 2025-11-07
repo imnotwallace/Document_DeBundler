@@ -26,7 +26,9 @@ class OCRService:
         gpu: bool = True,
         engine: Optional[str] = None,
         fallback_enabled: bool = True,
-        use_pooling: bool = True
+        use_pooling: bool = True,
+        language: str = "en",
+        model_version: str = "mobile"
     ):
         """
         Initialize OCR service.
@@ -36,6 +38,8 @@ class OCRService:
             engine: Specific engine to use ("paddleocr", "tesseract", or "auto")
             fallback_enabled: Enable fallback to alternative engine if primary fails
             use_pooling: Use engine pooling for reuse (recommended for batch processing)
+            language: OCR language code (e.g., "en", "ch", "french")
+            model_version: Model version ("server" or "mobile")
         """
         self.gpu = gpu
         self.engine_name = engine
@@ -53,6 +57,10 @@ class OCRService:
                 model_dir=get_model_directory()
             )
             
+            # Override language and model version
+            config.languages = [language]
+            config.model_version = model_version
+            
             # Use engine pooling if enabled
             if self.use_pooling and self._engine_pool:
                 logger.info(f"Initializing OCR service with engine pooling")
@@ -62,12 +70,12 @@ class OCRService:
                 self.manager = OCRManager(config=config, fallback_enabled=fallback_enabled)
                 # Don't call initialize() - will use pool
                 
-                logger.info(f"OCR service initialized with pooling (engine: {engine or 'auto'})")
+                logger.info(f"OCR service initialized with pooling (engine: {engine or 'auto'}, lang: {language}, version: {model_version})")
             else:
                 # Traditional initialization without pooling
                 self.manager = OCRManager(config=config, fallback_enabled=fallback_enabled)
                 self.manager.initialize()
-                logger.info(f"OCR service initialized with {self.manager.get_engine_name()}")
+                logger.info(f"OCR service initialized with {self.manager.get_engine_name()} (lang: {language}, version: {model_version})")
                 
         except Exception as e:
             logger.error(f"Failed to initialize OCR service: {e}", exc_info=True)
