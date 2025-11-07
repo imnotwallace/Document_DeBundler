@@ -333,35 +333,34 @@
       </p>
 
       <!-- Model Version Selector -->
-      {@const selectedLang = $availableLanguages.find(l => l.code === localConfig.languages[0])}
-      {#if selectedLang && selectedLang.has_server_version}
-        <div class="mt-3">
-          <label for="modelVersion" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            Model Version
-          </label>
-          <select
-            id="modelVersion"
-            class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            bind:value={localConfig.modelVersion}
-          >
-            <option value="server">Server (Higher Accuracy)</option>
-            <option value="mobile">Mobile (Faster, Lower Memory)</option>
-          </select>
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            {#if localConfig.modelVersion === 'server'}
-              Server models provide the best accuracy but require more memory and processing time.
-            {:else}
-              Mobile models are optimized for speed and lower memory usage, suitable for resource-constrained environments.
-            {/if}
-          </p>
-        </div>
-      {:else}
-        <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-          {#if selectedLang}
+      {#each $availableLanguages.filter(l => l.code === localConfig.languages[0]) as selectedLang}
+        {#if selectedLang.has_server_version}
+          <div class="mt-3">
+            <label for="modelVersion" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              Model Version
+            </label>
+            <select
+              id="modelVersion"
+              class="w-full px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              bind:value={localConfig.modelVersion}
+            >
+              <option value="server">Server (Higher Accuracy)</option>
+              <option value="mobile">Mobile (Faster, Lower Memory)</option>
+            </select>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {#if localConfig.modelVersion === 'server'}
+                Server models provide the best accuracy but require more memory and processing time.
+              {:else}
+                Mobile models are optimized for speed and lower memory usage, suitable for resource-constrained environments.
+              {/if}
+            </p>
+          </div>
+        {:else}
+          <div class="mt-3 text-xs text-gray-500 dark:text-gray-400">
             This language only has a mobile model available.
-          {/if}
-        </div>
-      {/if}
+          </div>
+        {/if}
+      {/each}
 
       <!-- Manage Language Packs Button -->
       <button

@@ -90,17 +90,19 @@ export async function getLanguageStatus(languageCode: string): Promise<LanguageP
  */
 export async function downloadLanguagePack(
     languageCode: string,
+    version: 'server' | 'mobile' = 'mobile',
     enableAngleClassification: boolean = false
 ): Promise<void> {
     clearError();
 
     try {
-        console.log(`Starting download for language: ${languageCode}`);
+        console.log(`Starting download for language: ${languageCode} (version: ${version})`);
 
         const response = await invoke<{ success: boolean; language_code: string; message: string }>(
             'download_language_pack',
             {
                 languageCode,
+                version,
                 enableAngleClassification
             }
         );

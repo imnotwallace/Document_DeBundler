@@ -163,7 +163,7 @@ class LanguagePackManager:
 
         try:
             if progress_callback:
-                version_str = f" ({version} version)" if lang_pack.has_server_version else ""
+                version_str = f" ({version} version)" if lang_pack.can_use_server_version() else ""
                 progress_callback(DownloadProgress(
                     language=language_code,
                     language_name=lang_pack.name,
@@ -178,7 +178,7 @@ class LanguagePackManager:
             logger.info(f"Initializing PaddleOCR for language: {language_code} (version: {version})")
 
             if progress_callback:
-                version_str = f" ({version} version)" if lang_pack.has_server_version else ""
+                version_str = f" ({version} version)" if lang_pack.can_use_server_version() else ""
                 progress_callback(DownloadProgress(
                     language=language_code,
                     language_name=lang_pack.name,
@@ -200,7 +200,7 @@ class LanguagePackManager:
                 raise Exception("Models did not download successfully")
 
             if progress_callback:
-                version_str = f" ({version} version)" if lang_pack.has_server_version else ""
+                version_str = f" ({version} version)" if lang_pack.can_use_server_version() else ""
                 progress_callback(DownloadProgress(
                     language=language_code,
                     language_name=lang_pack.name,

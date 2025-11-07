@@ -728,12 +728,13 @@ class IPCHandler:
             # Get parameters from options (sent by Rust)
             options = command.get("options", {})
             language_code = options.get("language_code")
+            version = options.get("version", "mobile")  # Default to mobile if not specified
 
             if not language_code:
                 self.send_error("Missing required parameter: language_code")
                 return
 
-            logger.info(f"Triggering PaddleOCR auto-download for language: {language_code}")
+            logger.info(f"Triggering PaddleOCR auto-download for language: {language_code} (version: {version})")
 
             manager = get_language_pack_manager()
 
@@ -756,6 +757,7 @@ class IPCHandler:
             # Trigger download via PaddleOCR initialization
             success = manager.trigger_language_download(
                 language_code,
+                version=version,
                 progress_callback=progress_callback
             )
 

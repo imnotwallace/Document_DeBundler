@@ -23,6 +23,9 @@
   let showInstalledOnly = false;
   let searchQuery = '';
   let sortBy: 'name' | 'size' | 'status' = 'name';
+  
+  // Track selected model version for each language (default to 'server' if available, else 'mobile')
+  let selectedVersions: Map<string, 'server' | 'mobile'> = new Map();
 
   // Lifecycle
   onMount(async () => {
@@ -78,13 +81,35 @@
       }
     });
 
+  // Initialize selected versions when languages load
+  $: if ($availableLanguages.length > 0) {
+    $availableLanguages.forEach(lang => {
+      if (!selectedVersions.has(lang.code)) {
+        // Default to server if available, otherwise mobile
+        const defaultVersion = lang.has_server_version ? 'server' : 'mobile';
+        selectedVersions.set(lang.code, defaultVersion);
+      }
+    });
+    selectedVersions = selectedVersions; // Trigger reactivity
+  }
+
   // Event handlers
   async function handleDownload(languageCode: string) {
     try {
-      await downloadLanguagePack(languageCode, false);
+      const version = selectedVersions.get(languageCode) || 'mobile';
+      await downloadLanguagePack(languageCode, version, false);
     } catch (err) {
       console.error(`Download failed for ${languageCode}:`, err);
     }
+  }
+  
+  function handleVersionChange(languageCode: string, version: 'server' | 'mobile') {
+    selectedVersions.set(languageCode, version);
+    selectedVersions = selectedVersions; // Trigger reactivity
+  }
+  
+  function getSelectedVersion(languageCode: string): 'server' | 'mobile' {
+    return selectedVersions.get(languageCode) || 'mobile';
   }
 
   function getProgressForLanguage(code: string): DownloadProgress | undefined {
@@ -164,6 +189,24 @@
             <div class="language-details">
               <span class="language-size">{formatSize(lang.total_size_mb)}</span>
               <span class="detail-badge">{lang.script_name} script</span>
+              
+              {#if lang.has_server_version && !lang.installed}
+                <div class="version-selector">
+                  <label class="version-label">
+                    <span class="version-label-text">Version:</span>
+                    <select 
+                      class="version-select"
+                      value={getSelectedVersion(lang.code)}
+                      on:change={(e) => handleVersionChange(lang.code, e.currentTarget.value as 'server' | 'mobile')}
+                    >
+                      <option value="server">Server (Accurate)</option>
+                      <option value="mobile">Mobile (Fast)</option>
+                    </select>
+                  </label>
+                </div>
+              {:else if lang.has_server_version && lang.installed}
+                <span class="version-badge">{lang.model_version || 'mobile'}</span>
+              {/if}
             </div>
           </div>
 
@@ -450,6 +493,49 @@
     background: #d1fae5;
     padding: 0.125rem 0.5rem;
     border-radius: 0.25rem;
+  }
+  
+  .version-selector {
+    margin-left: auto;
+  }
+  
+  .version-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+  }
+  
+  .version-label-text {
+    color: #6b7280;
+    font-weight: 500;
+  }
+  
+  .version-select {
+    padding: 0.25rem 0.5rem;
+    border: 1px solid #d1d5db;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    background: white;
+    cursor: pointer;
+    color: #1f2937;
+  }
+  
+  .version-select:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+  }
+  
+  .version-badge {
+    font-size: 0.75rem;
+    color: #6366f1;
+    background: #eef2ff;
+    padding: 0.125rem 0.5rem;
+    border-radius: 0.25rem;
+    font-weight: 500;
+    text-transform: capitalize;
+    margin-left: auto;
   }
 
   /* Actions */
