@@ -76,7 +76,7 @@ class PaddleOCREngine(OCREngine):
             # Get language(s) and determine model version
             lang = self.config.languages[0] if self.config.languages else 'en'
             model_version = getattr(self.config, 'model_version', 'mobile')  # Default to mobile
-            
+
             # Import language pack metadata to get correct model name
             try:
                 import sys
@@ -85,37 +85,40 @@ class PaddleOCREngine(OCREngine):
                 services_dir = Path(__file__).parent.parent.parent
                 if str(services_dir) not in sys.path:
                     sys.path.insert(0, str(services_dir))
-                
+
                 from services.language_pack_metadata import get_language_pack_with_version
-                
+
                 # Get language pack info with the requested version
                 lang_pack = get_language_pack_with_version(lang, model_version)
-                
+
                 if lang_pack:
                     rec_model_name = lang_pack.get_recognition_model_name()
-                    logger.info(f"Selected recognition model: {rec_model_name} for language '{lang}' (version: {model_version})")
+                    det_model_name = lang_pack.detection_model_name
+                    logger.info(f"Selected models - Detection: {det_model_name}, Recognition: {rec_model_name} (version: {model_version})")
                 else:
                     # Fall back to English mobile version if language not found
                     logger.warning(f"Language '{lang}' not found in metadata, falling back to English mobile")
-                    rec_model_name = "PP-OCRv5_mobile_rec"
+                    rec_model_name = "en_PP-OCRv5_mobile_rec"
+                    det_model_name = "en_PP-OCRv5_mobile_det"
                     lang = "en"
             except Exception as e:
                 # Fall back to English mobile version on any error
                 logger.warning(f"Failed to determine model version from metadata: {e}, falling back to English mobile")
-                rec_model_name = "PP-OCRv5_mobile_rec"
+                rec_model_name = "en_PP-OCRv5_mobile_rec"
+                det_model_name = "en_PP-OCRv5_mobile_det"
                 lang = "en"
                 model_version = "mobile"
-            
-            logger.info(f"Initializing PaddleOCR - Language: {lang}, Model: {rec_model_name}, Version: {model_version}")
 
-            # Initialize PaddleOCR with 3.x API
-            # PaddleOCR 3.x DOES support rec_model_name and det_model_name parameters!
-            # We can explicitly specify which recognition model to use (server vs mobile)
+            logger.info(f"Initializing PaddleOCR - Language: {lang}, Detection: {det_model_name}, Recognition: {rec_model_name}, Version: {model_version}")
+
+            # Initialize PaddleOCR with 3.x API using correct parameter names
+            # Use text_detection_model_name and text_recognition_model_name (NOT det_model_name/rec_model_name)
             ocr_kwargs = {
                 'lang': lang,
-                'rec_model_name': rec_model_name,  # Explicitly specify recognition model (e.g., en_PP-OCRv5_mobile_rec)
+                'text_detection_model_name': det_model_name,
+                'text_recognition_model_name': rec_model_name,
                 'use_textline_orientation': self.config.enable_angle_classification,
-                'text_det_limit_side_len': 18000,      # Support ultra-high-DPI scans (up to 1600 DPI on letter-size pages)
+                'text_det_limit_side_len': 18000,      # Support ultra-high-DPI scans
                 'text_det_limit_type': 'max',          # Specify max dimension behavior
                 'device': 'gpu' if use_gpu else 'cpu',
             }
