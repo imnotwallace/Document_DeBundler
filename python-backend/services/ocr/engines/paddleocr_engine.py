@@ -109,11 +109,11 @@ class PaddleOCREngine(OCREngine):
             logger.info(f"Initializing PaddleOCR - Language: {lang}, Model: {rec_model_name}, Version: {model_version}")
 
             # Initialize PaddleOCR with 3.x API
-            # Note: PaddleOCR 3.x doesn't support explicit rec_model_name parameter
-            # It auto-selects models based on lang parameter
-            # For now, we just use lang and let PaddleOCR handle model selection
+            # PaddleOCR 3.x DOES support rec_model_name and det_model_name parameters!
+            # We can explicitly specify which recognition model to use (server vs mobile)
             ocr_kwargs = {
                 'lang': lang,
+                'rec_model_name': rec_model_name,  # Explicitly specify recognition model (e.g., en_PP-OCRv5_mobile_rec)
                 'use_textline_orientation': self.config.enable_angle_classification,
                 'text_det_limit_side_len': 18000,      # Support ultra-high-DPI scans (up to 1600 DPI on letter-size pages)
                 'text_det_limit_type': 'max',          # Specify max dimension behavior

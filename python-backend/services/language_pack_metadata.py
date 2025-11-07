@@ -72,8 +72,8 @@ SCRIPT_MODELS = {
     ),
     "english": ScriptModelInfo(
         script_name="english",
-        server_model_name="PP-OCRv5_server_rec",
-        mobile_model_name="PP-OCRv5_mobile_rec",
+        server_model_name="en_PP-OCRv5_server_rec",  # English-specific server model
+        mobile_model_name="en_PP-OCRv5_mobile_rec",  # English-specific mobile model (85.25% accuracy)
         approximate_size_mb=9.0,
         description="English (optimized)",
         has_server_version=True
