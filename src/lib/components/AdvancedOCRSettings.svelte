@@ -325,31 +325,46 @@
           <!-- Show mobile version option -->
           <option
             value="{lang.code}|mobile"
-            disabled={!lang.mobile_installed}
             selected={localConfig.languages[0] === lang.code && localConfig.modelVersion === 'mobile'}
           >
-            {lang.name} - Mobile
-            {#if !lang.mobile_installed}
-              (Download Required)
-            {/if}
+            {lang.name} - Mobile {lang.mobile_installed ? '(Installed)' : '(Will auto-download)'}
           </option>
 
           <!-- Show server version option if available -->
           {#if lang.has_server_version}
             <option
               value="{lang.code}|server"
-              disabled={!lang.server_installed}
               selected={localConfig.languages[0] === lang.code && localConfig.modelVersion === 'server'}
             >
-              {lang.name} - Server
-              {#if !lang.server_installed}
-                (Download Required)
-              {/if}
+              {lang.name} - Server {lang.server_installed ? '(Installed)' : '(Will auto-download)'}
             </option>
           {/if}
         {/each}
       </select>
-      <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+
+      <!-- Auto-download info banner -->
+      {#each $availableLanguages.filter(l => l.code === localConfig.languages[0]) as selectedLang}
+        {#if (localConfig.modelVersion === 'server' && !selectedLang.server_installed) || (localConfig.modelVersion === 'mobile' && !selectedLang.mobile_installed)}
+          <div class="mt-2 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
+            <div class="flex items-start gap-2">
+              <svg class="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+              </svg>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-amber-900 dark:text-amber-100">
+                  Models Not Installed
+                </p>
+                <p class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                  The selected model will be automatically downloaded when you start OCR processing (first use only, ~{selectedLang.total_size_mb.toFixed(0)}MB).
+                  For faster first-time processing, use the "Manage Language Packs" button below to pre-download.
+                </p>
+              </div>
+            </div>
+          </div>
+        {/if}
+      {/each}
+
+      <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
         {#if localConfig.modelVersion === 'server'}
           Server models provide the best accuracy but require more memory and processing time.
         {:else}
@@ -357,7 +372,7 @@
         {/if}
       </p>
       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-        Use 'Manage Language Packs' button below to download additional languages or versions.
+        Use 'Manage Language Packs' button below to download models in advance.
       </p>
 
       <!-- Manage Language Packs Button -->
