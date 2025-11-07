@@ -103,8 +103,9 @@
     }
   }
   
-  function handleVersionChange(languageCode: string, version: 'server' | 'mobile') {
-    selectedVersions.set(languageCode, version);
+  function handleVersionChange(languageCode: string, version: string) {
+    // Type assertion here is safe since the select only has 'server' and 'mobile' options
+    selectedVersions.set(languageCode, version as 'server' | 'mobile');
     selectedVersions = selectedVersions; // Trigger reactivity
   }
   
@@ -197,7 +198,7 @@
                     <select 
                       class="version-select"
                       value={getSelectedVersion(lang.code)}
-                      on:change={(e) => handleVersionChange(lang.code, e.currentTarget.value as 'server' | 'mobile')}
+                      on:change={(e) => handleVersionChange(lang.code, e.currentTarget.value)}
                     >
                       <option value="server">Server (Accurate)</option>
                       <option value="mobile">Mobile (Fast)</option>
