@@ -229,10 +229,11 @@ class LanguagePackManager:
                     language_name=lang_pack.name,
                     phase="downloading",
                     progress_percent=50,
-                    message=f"Initializing OCR engine (this will download models if needed)..."
+                    message=f"Downloading models from Hugging Face (this may take 2-5 minutes)..."
                 ))
             
             # Initialize OCR service - this will download models if not present
+            logger.info(f"Creating OCRService (this may take 2-5 minutes if downloading models)...")
             ocr_service = OCRService(
                 gpu=False,  # Use CPU for download to avoid GPU issues
                 engine="paddleocr",  # Force PaddleOCR engine
@@ -241,6 +242,7 @@ class LanguagePackManager:
                 language=language_code,
                 model_version=version
             )
+            logger.info(f"OCRService created successfully")
             
             if progress_callback:
                 progress_callback(DownloadProgress(
