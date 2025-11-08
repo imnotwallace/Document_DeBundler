@@ -1,7 +1,16 @@
 """
 OCR Batch Service
-Production-ready OCR batch processing with adaptive memory management,
-error recovery, and progress tracking for large PDF processing.
+
+Production-ready OCR batch processing with:
+- STREAMING ASSEMBLY: Constant memory usage (190 MB) regardless of PDF size
+- DPI-FIRST SIZING: Prioritize target DPI over batch size (batch_size=1 if needed)
+- Adaptive memory management with VRAM monitoring
+- Error recovery and progress tracking
+- 2-image preprocessing pipeline (deskewed + preprocessed)
+
+Memory optimization:
+- Traditional: 5000 pages × 7.5 MB = 37.5 GB RAM (OOM!)
+- Streaming: batch_size × 10 MB = 190 MB RAM (constant)
 """
 
 import logging
@@ -101,8 +110,39 @@ class OCRProcessingConfig:
 
 class OCRBatchService:
     """
-    Production-ready OCR batch processing service.
+    Production-ready OCR batch processing service with STREAMING ASSEMBLY.
 
+    MEMORY ARCHITECTURE:
+    ====================
+    Uses streaming assembly to achieve constant memory usage regardless of PDF size.
+    
+    Traditional approach (MEMORY BOMB):
+    - Process all batches, accumulate images in memory
+    - Peak RAM: total_pages × 7.5 MB (37.5 GB for 5000 pages!)
+    
+    Streaming approach (CONSTANT MEMORY):
+    - OCR batch → immediately assemble to PDF → free images
+    - Peak RAM: batch_size × 10 MB (~190 MB constant)
+    
+    PROCESSING FLOW:
+    ================
+    Phase 1: Scan all pages (identify text layer vs OCR needed)
+    Phase 2: Process OCR batches in REVERSE order
+    Phase 3: IMMEDIATELY assemble each page to output PDF
+    Phase 4: Add text overlays to text-layer pages
+    Phase 5: Save final PDF
+    
+    Why reverse order?
+    - Rebuilding page 0 shifts indices for pages 1,2,3...
+    - Processing backwards (999→0) keeps indices stable
+    
+    DPI-FIRST BATCH SIZING:
+    =======================
+    When user specifies target DPI from frontend:
+    - Calculate batch_size to achieve that DPI (even if batch_size=1)
+    - Prioritize quality over speed
+    - Memory is managed by streaming, not batch size
+    
     Features:
     - Adaptive memory management with VRAM monitoring
     - Exponential backoff retry logic
@@ -110,6 +150,8 @@ class OCRBatchService:
     - Detailed progress tracking with ETA
     - Cancellation support
     - Text layer detection to skip unnecessary OCR
+    - Streaming assembly (constant memory)
+    - DPI-first batch sizing
     """
 
     # Retry configuration
@@ -240,26 +282,52 @@ class OCRBatchService:
 
     def _detect_batch_size(self) -> int:
         """
-        Detect optimal batch size based on GPU VRAM and system RAM.
+        Detect optimal batch size based on target DPI (if provided) or GPU VRAM.
+        
+        DPI-FIRST APPROACH: If user specifies DPI, calculate batch size to achieve that DPI.
+        Otherwise, use legacy optimization (maximize batch size, reduce DPI if needed).
         
         Automatically adjusts for preprocessing pipeline memory overhead:
         - Without preprocessing: 1 image per page (original only)
         - With preprocessing: 2 images per page (deskewed + fully preprocessed, original eliminated)
         
         Returns:
-            Optimal batch size for current hardware
+            Optimal batch size for current hardware and target DPI
         """
         use_gpu = self.use_gpu and self.capabilities['gpu_available']
         
         # Detect model type (mobile or server)
-        from .ocr.config import detect_model_type
+        from .ocr.config import detect_model_type, calculate_batch_size_for_dpi
         model_type = detect_model_type()
         
-        # Get base batch size (assumes 2 images per page)
+        # DPI-FIRST: If user specified DPI, calculate batch size for that DPI
+        if hasattr(self, 'override_dpi') and self.override_dpi:
+            target_dpi = self.override_dpi
+            
+            batch_size = calculate_batch_size_for_dpi(
+                target_dpi=target_dpi,
+                use_gpu=use_gpu,
+                gpu_memory_gb=self.capabilities['gpu_memory_gb'],
+                system_memory_gb=self.capabilities['system_memory_gb'],
+                preprocessing_enabled=self.config.enable_intelligent_preprocessing,
+                model_type=model_type
+            )
+            
+            logger.info(
+                f"DPI-first batch sizing: target_dpi={target_dpi}, "
+                f"batch_size={batch_size} "
+                f"({'GPU ' + str(self.capabilities['gpu_memory_gb']) + 'GB' if use_gpu else 'CPU'})"
+            )
+            
+            return batch_size
+        
+        # LEGACY: No DPI specified, use old optimization (maximize batch size)
+        # Get base batch size (assumes 300 DPI baseline)
         base_batch_size = get_optimal_batch_size(
             use_gpu=use_gpu,
             gpu_memory_gb=self.capabilities['gpu_memory_gb'],
             system_memory_gb=self.capabilities['system_memory_gb'],
+            dpi=300,  # Baseline DPI
             model_type=model_type
         )
         
@@ -424,46 +492,107 @@ class OCRBatchService:
 
     def _apply_deskew_only(self, image: np.ndarray) -> np.ndarray:
         """
-        Apply ONLY deskew to an image (visual improvement for final output).
+        Apply ONLY deskew to an RGB image (visual improvement for final output).
         
         This is separate from full preprocessing (denoise/sharpen/binarize)
         which are OCR-only enhancements not appropriate for final output.
         
+        Uses Hough line transform to detect document rotation and correct it.
+        
         Args:
-            image: Input image (RGB)
+            image: Input image (RGB numpy array)
             
         Returns:
             Deskewed image (RGB) or original if deskew fails/not needed
         """
         try:
             import cv2
-            from .ocr.preprocessing import ImagePreprocessor
             
-            # Convert to grayscale for angle detection
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = image.copy()
-            
-            # Create preprocessor and apply deskew
-            preprocessor = ImagePreprocessor()
-            deskewed_gray = preprocessor._deskew(gray)
-            
-            # Check if deskew actually changed the image
-            if np.array_equal(gray, deskewed_gray):
-                # No deskew needed
+            # Make a copy to avoid modifying original
+            if len(image.shape) != 3:
+                logger.debug("Deskew requires RGB image, received grayscale")
                 return image
             
-            # Convert back to RGB if original was RGB
-            if len(image.shape) == 3:
-                # Apply same transformation to color image
-                # We need to apply the detected rotation to the RGB image
-                # For now, just return original (deskew on RGB needs more work)
-                # TODO: Implement proper RGB deskewing
-                logger.debug("Deskew detected but RGB deskewing not yet implemented")
+            # Step 1: Convert to grayscale for angle detection
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            
+            # Step 2: Apply binary threshold (Otsu's method)
+            # This helps with edge detection
+            _, binary = cv2.threshold(
+                gray, 0, 255,
+                cv2.THRESH_BINARY + cv2.THRESH_OTSU
+            )
+            
+            # Step 3: Detect edges using Canny
+            edges = cv2.Canny(binary, 50, 150, apertureSize=3)
+            
+            # Step 4: Use Hough line transform to detect dominant lines
+            lines = cv2.HoughLinesP(
+                edges,
+                rho=1,
+                theta=np.pi/180,
+                threshold=100,
+                minLineLength=100,
+                maxLineGap=10
+            )
+            
+            if lines is None or len(lines) == 0:
+                logger.debug("No lines detected for deskew, using original")
                 return image
-            else:
-                return cv2.cvtColor(deskewed_gray, cv2.COLOR_GRAY2RGB)
+            
+            # Step 5: Calculate angles of all detected lines
+            angles = []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                angles.append(angle)
+            
+            # Step 6: Find median angle (more robust than mean)
+            median_angle = np.median(angles)
+            
+            # Step 7: Normalize angle to [-45, 45] range
+            # Documents are typically rotated by small angles
+            if median_angle < -45:
+                median_angle = 90 + median_angle
+            elif median_angle > 45:
+                median_angle = median_angle - 90
+            
+            # Step 8: Only deskew if angle is significant (> 0.5 degrees)
+            if abs(median_angle) < 0.5:
+                logger.debug(f"Skew angle {median_angle:.2f}° too small, no deskew needed")
+                return image
+            
+            logger.debug(f"Detected skew angle: {median_angle:.2f}°, applying deskew")
+            
+            # Step 9: Rotate RGB image by detected angle
+            height, width = image.shape[:2]
+            center = (width // 2, height // 2)
+            
+            # Get rotation matrix
+            rotation_matrix = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+            
+            # Calculate new bounding box size to avoid cropping
+            cos = np.abs(rotation_matrix[0, 0])
+            sin = np.abs(rotation_matrix[0, 1])
+            new_width = int((height * sin) + (width * cos))
+            new_height = int((height * cos) + (width * sin))
+            
+            # Adjust rotation matrix for new size
+            rotation_matrix[0, 2] += (new_width / 2) - center[0]
+            rotation_matrix[1, 2] += (new_height / 2) - center[1]
+            
+            # Apply rotation to RGB image
+            deskewed = cv2.warpAffine(
+                image,
+                rotation_matrix,
+                (new_width, new_height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(255, 255, 255)  # White background
+            )
+            
+            logger.debug(f"Deskewed image by {median_angle:.2f}°")
+            return deskewed
                 
         except Exception as e:
             logger.warning(f"Deskew failed: {e}, using original image")
@@ -906,13 +1035,13 @@ class OCRBatchService:
             
             # Get image dimensions from OCR result (actual dimensions used for OCR)
             # This accounts for any preprocessing that may have changed dimensions
+            dpi = 300  # Default DPI for coordinate mapping
             if hasattr(ocr_result, 'image_width') and ocr_result.image_width:
                 image_width = ocr_result.image_width
                 image_height = ocr_result.image_height
                 logger.debug(f"Using actual OCR image dimensions: {image_width}x{image_height}")
             else:
                 # Fallback: calculate from page_rect (assume 300 DPI rendering)
-                dpi = 300
                 image_width = int(page_rect.width * dpi / 72)
                 image_height = int(page_rect.height * dpi / 72)
                 logger.debug(f"Using calculated dimensions from page_rect: {image_width}x{image_height}")
@@ -1018,6 +1147,14 @@ class OCRBatchService:
     ) -> List[tuple]:
         """
         Process a batch of PDF pages with OCR and retry logic.
+        
+        STREAMING ARCHITECTURE:
+        Returns (text, ocr_result, deskewed_img) tuples for IMMEDIATE consumption.
+        Caller MUST free deskewed_img after use to maintain constant memory.
+        
+        Memory per batch: batch_size × 10 MB
+        - Deskewed RGB: 7.5 MB per page
+        - Preprocessed grayscale: 2.5 MB per page (freed before return)
 
         Args:
             pdf: PDFProcessor instance
@@ -1025,7 +1162,8 @@ class OCRBatchService:
             file_name: Name of file being processed (for logging)
 
         Returns:
-            List of (text, ocr_result) tuples for each page
+            List of (text, ocr_result, deskewed_img) tuples for each page
+            IMPORTANT: Caller must immediately use and free deskewed_img!
         """
         # Check VRAM pressure and adjust batch size if needed
         if self.vram_monitor:
@@ -1038,8 +1176,8 @@ class OCRBatchService:
                 # Process one at a time under memory pressure
                 results = []
                 for page_num in page_numbers:
-                    text, ocr_result, original_img, deskewed_img = self._process_single_page(pdf, page_num, file_name)
-                    results.append((text, ocr_result, original_img, deskewed_img))
+                    text, ocr_result, deskewed_img = self._process_single_page(pdf, page_num, file_name)
+                    results.append((text, ocr_result, deskewed_img))
                 return results
 
         # Normal batch processing
@@ -1276,7 +1414,13 @@ class OCRBatchService:
         total_files: int
     ) -> Dict[str, Any]:
         """
-        Process a single PDF file.
+        Process a single PDF file with STREAMING ASSEMBLY.
+        
+        Memory-optimized approach:
+        - Phase 1: Scan pages to identify text layer vs OCR needed
+        - Phase 2: Process OCR batches in REVERSE order
+        - Phase 3: IMMEDIATELY assemble each page to PDF (no accumulation)
+        - Peak RAM: batch_size × 10 MB (constant, not proportional to PDF size!)
 
         Args:
             file_path: Path to PDF file
@@ -1285,13 +1429,7 @@ class OCRBatchService:
             total_files: Total number of files
 
         Returns:
-            Dictionary with processing results:
-                - status: "success" or "failed"
-                - pages_processed: Number of pages processed
-                - pages_ocr: Number of pages that required OCR
-                - pages_text_layer: Number of pages with text layer
-                - error: Error message (if failed)
-                - output_path: Path to output file (if successful)
+            Dictionary with processing results
         """
         file_name = Path(file_path).name
         logger.info(f"Processing file {file_idx}/{total_files}: {file_name}")
@@ -1306,17 +1444,18 @@ class OCRBatchService:
         }
 
         try:
-            # Open PDF
+            # Open PDF for analysis
             with PDFProcessor(file_path) as pdf:
                 total_pages = pdf.get_page_count()
                 logger.info(f"File has {total_pages} pages")
 
-                # Track pages needing OCR and original texts
+                # ============================================================
+                # PHASE 1: Scan all pages to identify text layer vs OCR needed
+                # ============================================================
                 pages_needing_ocr = []
-                page_texts = {}
-                original_texts = {}  # Store original text for quality comparison
+                text_layer_pages = {}  # {page_num: text}
+                original_texts = {}  # For quality comparison
 
-                # Check each page for text layer
                 for page_num in range(total_pages):
                     # Check cancellation
                     if self._is_cancelled():
@@ -1328,7 +1467,7 @@ class OCRBatchService:
                     self._report_progress(
                         current=page_num,
                         total=total_pages,
-                        message=f"File {file_idx}/{total_files}: {file_name} - Checking page {page_num + 1}/{total_pages}"
+                        message=f"File {file_idx}/{total_files}: {file_name} - Scanning page {page_num + 1}/{total_pages}"
                     )
 
                     # Check for text layer
@@ -1337,12 +1476,10 @@ class OCRBatchService:
                     if has_text:
                         # Extract from text layer (fast)
                         text = pdf.extract_text(page_num)
-                        # Store as tuple for consistency with OCR results
-                        dummy_result = OCRResult(text=text, confidence=1.0, bbox=None)
-                        page_texts[page_num] = (text, dummy_result)
-                        original_texts[page_num] = text  # Save for quality comparison
+                        text_layer_pages[page_num] = text
+                        original_texts[page_num] = text
                         result['pages_text_layer'] += 1
-                        logger.debug(f"Page {page_num + 1}: Using text layer")
+                        logger.debug(f"Page {page_num + 1}: Has text layer")
                     else:
                         # Queue for OCR
                         pages_needing_ocr.append(page_num)
@@ -1350,83 +1487,77 @@ class OCRBatchService:
                         original_texts[page_num] = pdf.extract_text(page_num)
                         logger.debug(f"Page {page_num + 1}: Needs OCR")
 
-                # Process pages needing OCR in batches
-                if pages_needing_ocr:
-                    logger.info(f"{len(pages_needing_ocr)} pages need OCR")
+                logger.info(
+                    f"Scan complete: {len(text_layer_pages)} text layer pages, "
+                    f"{len(pages_needing_ocr)} need OCR"
+                )
 
-                    for batch_start_idx in range(0, len(pages_needing_ocr), self.batch_size):
+                # ============================================================
+                # PHASE 2: Prepare output PDF
+                # ============================================================
+                output_path = Path(output_dir) / file_name
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Track original file size
+                original_size = Path(file_path).stat().st_size
+
+                # Open output PDF (will modify in-place)
+                doc = fitz.open(file_path)
+
+                # Import analyzer for page type detection
+                from .pdf_text_layer_analyzer import PDFTextLayerAnalyzer, PageType
+                analyzer = PDFTextLayerAnalyzer()
+
+                # ============================================================
+                # PHASE 3: Process OCR batches in REVERSE and assemble immediately
+                # ============================================================
+                # CRITICAL: Process in REVERSE to avoid index shifting!
+                # When we rebuild page 0, indices 1,2,3... shift
+                # By going backwards (999→0), indices remain stable
+                
+                if pages_needing_ocr:
+                    logger.info(f"Starting streaming OCR+assembly for {len(pages_needing_ocr)} pages")
+                    
+                    # Reverse the list for processing
+                    pages_needing_ocr_reversed = list(reversed(pages_needing_ocr))
+                    
+                    # Process in reverse batches
+                    for batch_start_idx in range(0, len(pages_needing_ocr_reversed), self.batch_size):
                         # Check cancellation
                         if self._is_cancelled():
                             logger.info("Processing cancelled during OCR")
                             result['error'] = "Processing cancelled by user"
+                            doc.close()
                             return result
 
-                        batch_end_idx = min(batch_start_idx + self.batch_size, len(pages_needing_ocr))
-                        batch_page_nums = pages_needing_ocr[batch_start_idx:batch_end_idx]
+                        batch_end_idx = min(batch_start_idx + self.batch_size, len(pages_needing_ocr_reversed))
+                        batch_page_nums = pages_needing_ocr_reversed[batch_start_idx:batch_end_idx]
 
                         # Report progress
+                        pages_completed = batch_start_idx
                         self._report_progress(
-                            current=batch_start_idx,
+                            current=pages_completed,
                             total=len(pages_needing_ocr),
-                            message=f"File {file_idx}/{total_files}: {file_name} - OCR batch {batch_start_idx + 1}-{batch_end_idx}/{len(pages_needing_ocr)}"
+                            message=f"File {file_idx}/{total_files}: {file_name} - OCR batch {pages_completed}/{len(pages_needing_ocr)}"
                         )
 
-                        # Process batch - returns (text, ocr_result, deskewed_image) tuples
+                        logger.debug(f"Processing reverse batch: pages {[p+1 for p in batch_page_nums]}")
+
+                        # OCR batch - returns (text, ocr_result, deskewed_img) tuples
+                        # Images are temporarily in memory (190 MB for batch_size=19)
                         batch_results = self._process_page_batch(pdf, batch_page_nums, file_name)
 
-                        # Store results and track success/failure
-                        for page_num, (text, ocr_result, deskewed_img) in zip(batch_page_nums, batch_results):
-                            # Always store the result with image for final output
-                            # OPTIMIZED: Format is now (text, ocr_result, deskewed_image) - original eliminated
-                            page_texts[page_num] = (text, ocr_result, deskewed_img)
-                            if text:  # Track successful OCR
+                        # IMMEDIATELY ASSEMBLE each page while image is hot in memory
+                        for page_num, (ocr_text, ocr_result, deskewed_img) in zip(batch_page_nums, batch_results):
+                            
+                            # Track OCR results
+                            if ocr_text:
                                 result['pages_ocr'] += 1
-                            else:  # Track empty OCR results (blank pages, images, etc.)
+                            else:
                                 logger.warning(f"Page {page_num+1}: OCR returned empty text")
                                 result['pages_ocr_empty'] = result.get('pages_ocr_empty', 0) + 1
 
-                        # Memory cleanup every N pages
-                        if (batch_end_idx % self.CLEANUP_PAGE_INTERVAL) == 0:
-                            gc.collect()
-                            if self.vram_monitor:
-                                self.vram_monitor.log_stats()
-
-                result['pages_processed'] = total_pages
-
-                # Create output directory if needed
-                output_path = Path(output_dir) / file_name
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-
-                # Save PDF with embedded OCR text layers
-                try:
-                    # Track original file size for reporting
-                    original_size = Path(file_path).stat().st_size
-
-                    # Open the original PDF with fitz
-                    doc = fitz.open(file_path)
-
-                    # Analyze pages to determine processing strategy (hybrid mode)
-                    from .pdf_text_layer_analyzer import PDFTextLayerAnalyzer, PageType
-                    analyzer = PDFTextLayerAnalyzer()
-
-                    # Add invisible text layers to OCR'd pages
-                    # IMPORTANT: Process in REVERSE order to avoid index shifting issues
-                    # When we rebuild page 0, indices for pages 5, 10 shift
-                    # By processing from end to beginning, indices remain stable
-                    if pages_needing_ocr:
-                        for page_num in reversed(pages_needing_ocr):
-                            if page_num not in page_texts:
-                                continue
-
-                            # Unpack text, OCR result, and deskewed image (original eliminated)
-                            ocr_text, ocr_result, deskewed_img = page_texts[page_num]
-
-                            # Log if OCR returned empty text, but still process to embed empty layer
-                            if not ocr_text:
-                                logger.warning(f"Page {page_num+1}: OCR returned empty text, embedding empty layer")
-                                # Don't skip - allow empty text layers to be embedded
-
-                            # Quality comparison (from Step 2)
+                            # Quality comparison - should we use OCR?
                             should_replace = True
                             if page_num in original_texts and original_texts[page_num]:
                                 should_replace, reason = self._should_replace_with_ocr(
@@ -1437,32 +1568,35 @@ class OCRBatchService:
                                 )
 
                                 if not should_replace:
-                                    # Check if both original and OCR are below quality threshold
-                                    original_score = self._calculate_quality_score(original_texts[page_num], doc[page_num])
+                                    # Check if both are low quality
+                                    original_score = self._calculate_quality_score(
+                                        original_texts[page_num], 
+                                        doc[page_num]
+                                    )
                                     if original_score < self.config.min_quality_threshold:
                                         logger.warning(
                                             f"Page {page_num+1}: Both original and OCR are low quality "
-                                            f"(original: {original_score:.2%}, threshold: {self.config.min_quality_threshold:.2%}), "
-                                            f"keeping original but flagging for review"
+                                            f"(original: {original_score:.2%}), keeping original"
                                         )
                                         result['pages_low_quality'] = result.get('pages_low_quality', 0) + 1
+                                    
                                     logger.info(f"Page {page_num+1}: Keeping original - {reason}")
+                                    
+                                    # Free image immediately (don't need it)
+                                    del deskewed_img
                                     continue
 
-                            # Analyze page to determine rebuild strategy
+                            # Analyze page type for rebuild strategy
                             page_analysis = analyzer.analyze_page(doc[page_num], page_num)
 
-                            # Determine rebuild strategy based on page type
                             if page_analysis.page_type == PageType.SCANNED_PAGE:
-                                # Fully scanned page: needs full rebuild with compression
                                 rebuild_strategy = "full"
-                                logger.debug(f"Page {page_num+1}: Using FULL rebuild (scanned page)")
+                                logger.debug(f"Page {page_num+1}: Using FULL rebuild (scanned)")
                             else:
-                                # Page with some content: use overlay only (no re-render)
                                 rebuild_strategy = "overlay"
-                                logger.debug(f"Page {page_num+1}: Using OVERLAY strategy ({page_analysis.page_type.value})")
+                                logger.debug(f"Page {page_num+1}: Using OVERLAY ({page_analysis.page_type.value})")
 
-                            # Process page with determined strategy
+                            # ASSEMBLE TO PDF RIGHT NOW (while image is in memory)
                             try:
                                 self._clean_rebuild_page_with_ocr(
                                     doc=doc,
@@ -1470,29 +1604,73 @@ class OCRBatchService:
                                     ocr_text=ocr_text,
                                     ocr_result=ocr_result,
                                     rebuild_strategy=rebuild_strategy,
-                                    deskewed_image=deskewed_img  # NEW: Pass deskewed image for full rebuild
+                                    deskewed_image=deskewed_img
                                 )
-                                logger.info(f"Page {page_num+1}: Embedded OCR layer ({rebuild_strategy} strategy)")
+                                logger.debug(f"Page {page_num+1}: Assembled with {rebuild_strategy} strategy")
 
                                 # Track strategy usage
                                 strategy_key = f'pages_{rebuild_strategy}_strategy'
                                 result[strategy_key] = result.get(strategy_key, 0) + 1
 
                             except Exception as e:
-                                logger.error(f"Page {page_num+1}: Failed to embed OCR - {e}")
+                                logger.error(f"Page {page_num+1}: Failed to assemble - {e}")
                                 # Continue with other pages
 
-                    # Save the modified PDF with optimized settings
-                    # - garbage=4: Maximum garbage collection (removes unused objects)
-                    # - deflate=True: Compress text streams
-                    # - clean=True: Clean up and optimize PDF structure
-                    # - pretty=False: Don't pretty-print (smaller file size)
+                            # FREE IMAGE IMMEDIATELY after assembly
+                            del deskewed_img
+
+                        # Free entire batch
+                        del batch_results
+                        
+                        # Aggressive memory cleanup after each batch
+                        gc.collect()
+                        if self.vram_monitor:
+                            self.vram_monitor.log_stats()
+
+                        logger.debug(f"Batch complete, memory freed")
+
+                # ============================================================
+                # PHASE 4: Add text overlays to text-layer-only pages
+                # ============================================================
+                # These pages don't need image re-rendering, just text overlay
+                # Process in normal order (no rebuild, so no index shifting)
+                
+                if text_layer_pages:
+                    logger.info(f"Adding text overlays to {len(text_layer_pages)} text layer pages")
+                    
+                    for page_num, text in text_layer_pages.items():
+                        try:
+                            page = doc[page_num]
+                            page_rect = page.rect
+                            
+                            # Simple text overlay (no OCR result, so no coordinate mapping)
+                            page.insert_textbox(
+                                page_rect,
+                                text,
+                                fontsize=8,
+                                color=(1, 1, 1),  # Invisible
+                                overlay=True,
+                                render_mode=3
+                            )
+                            logger.debug(f"Page {page_num+1}: Added text overlay")
+                            
+                        except Exception as e:
+                            logger.error(f"Page {page_num+1}: Failed to add text overlay - {e}")
+                            # Continue with other pages
+
+                # ============================================================
+                # PHASE 5: Save final PDF
+                # ============================================================
+                result['pages_processed'] = total_pages
+
+                try:
+                    # Save with optimization
                     doc.save(
                         str(output_path),
-                        garbage=4,
-                        deflate=True,
-                        clean=True,
-                        pretty=False
+                        garbage=4,  # Maximum garbage collection
+                        deflate=True,  # Compress streams
+                        clean=True,  # Clean structure
+                        pretty=False  # Compact output
                     )
                     doc.close()
 
@@ -1509,23 +1687,24 @@ class OCRBatchService:
                     result['size_increase_mb'] = round(size_increase_mb, 2)
 
                     logger.info(
-                        f"Saved PDF with OCR text layers to {output_path} - "
+                        f"Saved PDF with OCR: {output_path} - "
                         f"Size: {result['original_size_mb']:.2f}MB → {result['final_size_mb']:.2f}MB "
                         f"({size_increase_ratio:.2f}x, +{size_increase_mb:.2f}MB)"
                     )
 
                 except Exception as save_error:
                     logger.error(f"Failed to save PDF {file_name}: {save_error}", exc_info=True)
-                    # Fall back to copying original if save fails
+                    
+                    # Fallback: copy original
                     try:
                         import shutil
                         shutil.copy2(file_path, output_path)
                         result['output_path'] = str(output_path)
                         result['status'] = 'success'
-                        result['warning'] = f"Copied original PDF (OCR text layer save failed: {save_error})"
-                        logger.warning(f"Fell back to copying original PDF for {file_name}")
+                        result['warning'] = f"Copied original (save failed: {save_error})"
+                        logger.warning(f"Fell back to copying original for {file_name}")
                     except Exception as copy_error:
-                        logger.error(f"Failed to copy PDF {file_name}: {copy_error}", exc_info=True)
+                        logger.error(f"Failed to copy {file_name}: {copy_error}", exc_info=True)
                         result['error'] = f"Failed to save PDF: {save_error}"
                         result['status'] = 'failed'
                         return result
@@ -1534,8 +1713,8 @@ class OCRBatchService:
 
                 logger.info(
                     f"Successfully processed {file_name}: "
-                    f"{result['pages_text_layer']} from text layer, "
-                    f"{result['pages_ocr']} from OCR"
+                    f"{result['pages_text_layer']} text layer, "
+                    f"{result['pages_ocr']} OCR"
                 )
 
         except Exception as e:

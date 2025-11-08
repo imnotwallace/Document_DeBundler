@@ -243,6 +243,116 @@ def get_optimal_batch_size(
     return adjusted_batch
 
 
+def calculate_batch_size_for_dpi(
+    target_dpi: int,
+    use_gpu: bool,
+    gpu_memory_gb: float = 0,
+    system_memory_gb: Optional[float] = None,
+    preprocessing_enabled: bool = True,
+    model_type: str = "mobile"
+) -> int:
+    """
+    Calculate batch size needed to achieve target DPI.
+    
+    DPI-FIRST approach: Calculate how many pages we can fit in memory at the requested DPI,
+    rather than calculating DPI based on a fixed batch size.
+    
+    Memory calculation:
+    - Image size at DPI: (8.5*DPI) x (11*DPI) pixels
+    - RGB image: width * height * 3 bytes
+    - Grayscale: width * height * 1 byte
+    - Preprocessing: 2 images per page (deskewed RGB + preprocessed grayscale)
+    - Without preprocessing: 1 image per page (original RGB)
+    
+    Args:
+        target_dpi: User-requested target DPI
+        use_gpu: Whether GPU will be used
+        gpu_memory_gb: Available GPU memory in GB
+        system_memory_gb: System RAM in GB (auto-detected if None)
+        preprocessing_enabled: Whether intelligent preprocessing is enabled
+        model_type: PP-OCRv5 model type ("mobile" or "server")
+    
+    Returns:
+        Maximum batch size that fits in memory at target DPI (minimum 1)
+    """
+    if system_memory_gb is None:
+        system_memory_gb = get_system_memory_gb()
+    
+    # Calculate memory per page at target DPI
+    # Letter page: 8.5" x 11"
+    width_px = int(8.5 * target_dpi)
+    height_px = int(11 * target_dpi)
+    pixels_per_page = width_px * height_px
+    
+    # Memory footprint calculation
+    if preprocessing_enabled:
+        # 2 images: deskewed RGB + preprocessed grayscale
+        rgb_bytes = pixels_per_page * 3  # Deskewed RGB
+        gray_bytes = pixels_per_page * 1  # Preprocessed grayscale
+        bytes_per_page = rgb_bytes + gray_bytes
+    else:
+        # 1 image: original RGB
+        bytes_per_page = pixels_per_page * 3
+    
+    # Add processing overhead (buffers, intermediate arrays, etc.)
+    # PaddleOCR needs extra memory for:
+    # - Input preprocessing (normalization, padding)
+    # - Model inference (activations, gradients)
+    # - Output postprocessing (NMS, text decoding)
+    # Overhead factor: ~2.5x for mobile models, ~4x for server models
+    overhead_factor = 4.0 if model_type == "server" else 2.5
+    bytes_per_page_with_overhead = int(bytes_per_page * overhead_factor)
+    
+    mb_per_page = bytes_per_page_with_overhead / (1024 ** 2)
+    
+    # Calculate available memory for batching
+    if use_gpu and gpu_memory_gb > 0:
+        # GPU processing
+        # Reserve memory for:
+        # - PaddleOCR model: ~150MB (mobile) or ~600MB (server)
+        # - System overhead: ~200MB
+        model_memory_mb = 600 if model_type == "server" else 150
+        system_overhead_mb = 200
+        reserved_mb = model_memory_mb + system_overhead_mb
+        
+        available_mb = (gpu_memory_gb * 1024) - reserved_mb
+        
+        # Use 85% of available memory to avoid OOM
+        usable_mb = available_mb * 0.85
+    else:
+        # CPU processing
+        # Use 50% of system RAM for batch processing
+        available_mb = system_memory_gb * 1024 * 0.5
+        usable_mb = available_mb
+    
+    # Calculate batch size
+    batch_size = int(usable_mb / mb_per_page)
+    batch_size = max(1, batch_size)  # Minimum 1 page
+    
+    # Log calculation details
+    logger.info(
+        f"DPI-first batch sizing: target_dpi={target_dpi}, "
+        f"memory_per_page={mb_per_page:.1f}MB, "
+        f"available_memory={usable_mb:.1f}MB, "
+        f"batch_size={batch_size}"
+    )
+    
+    # Warn if batch size is very small (slow processing)
+    if batch_size == 1:
+        logger.warning(
+            f"Target DPI ({target_dpi}) requires batch_size=1 "
+            f"({mb_per_page:.1f}MB per page, {usable_mb:.1f}MB available). "
+            f"Processing will be slower but will achieve target quality."
+        )
+    elif batch_size <= 5:
+        logger.info(
+            f"Target DPI ({target_dpi}) allows small batch_size={batch_size}. "
+            f"Consider reducing DPI for faster processing if quality is acceptable."
+        )
+    
+    return batch_size
+
+
 def detect_hardware_capabilities() -> Dict[str, Any]:
     """
     Detect available hardware capabilities.
