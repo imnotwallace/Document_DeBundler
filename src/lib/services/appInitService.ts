@@ -4,6 +4,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { updateHardwareCapabilities, type HardwareCapabilities } from '../stores/hardwareStore';
 
 export interface InitProgress {
   progress: number; // 0-100
@@ -51,7 +52,12 @@ export async function initializeApp(
       completedSteps,
     });
 
-    await invoke('get_hardware_capabilities');
+    const capabilities = await invoke<HardwareCapabilities>('get_hardware_capabilities');
+    
+    // Save to store for app-wide access
+    updateHardwareCapabilities(capabilities);
+    
+    console.log('[AppInit] Hardware capabilities detected and cached:', capabilities);
     completedSteps++;
 
     onProgress({

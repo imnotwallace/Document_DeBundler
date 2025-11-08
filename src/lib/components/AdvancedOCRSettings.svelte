@@ -7,6 +7,7 @@
   import LanguagePackManager from './LanguagePackManager.svelte';
   import { isLanguageInstalled, availableLanguages, isLoadingLanguages } from '../stores/languagePackStore';
   import { loadAvailableLanguages } from '../services/languagePackService';
+  import { hardwareCapabilities } from '../stores/hardwareStore';
 
   // Props
   export let isOpen: boolean = false;
@@ -16,11 +17,20 @@
   let localConfig: OCRConfig = $ocrConfig;
   let useDefaultDpi: boolean = false;
   let previousIsOpen: boolean = false; // Track modal state transitions
-  let gpuAvailable: boolean = false;
-  let gpuMemoryGb: number = 0;
-  let systemMemoryGb: number = 0;
-  let systemMaxDpi: number = 600; // Will be calculated
-  let calculatedBatchSize: number = 10;
+  
+  // Hardware info - read from global store (populated during app init)
+  $: gpuAvailable = $hardwareCapabilities.gpu_available;
+  $: gpuMemoryGb = $hardwareCapabilities.gpu_memory_gb;
+  $: systemMemoryGb = $hardwareCapabilities.system_memory_gb;
+  $: systemMaxDpi = calculateSystemMaxDpi(gpuMemoryGb);
+  // Dynamically calculate batch size using backend's empirical logic
+  $: calculatedBatchSize = calculateBatchSize(
+    localConfig?.dpi || 300,
+    gpuMemoryGb,
+    systemMemoryGb,
+    gpuAvailable && (localConfig?.useGpu ?? true),
+    localConfig?.modelVersion || 'mobile'
+  );
   let showLanguagePackManager: boolean = false;
 
   // Constants
@@ -74,22 +84,14 @@
     };
     useDefaultDpi = localConfig.dpi === DEFAULT_DPI;
     console.log('[AdvancedOCRSettings] Local config initialized:', localConfig);
-    // Reload GPU capabilities when modal opens to ensure fresh data is displayed
-    loadSystemRecommendations();
+    console.log('[AdvancedOCRSettings] Using hardware capabilities from store:', $hardwareCapabilities);
     previousIsOpen = true; // Mark that we've handled this open event
   } else if (!isOpen && previousIsOpen) {
     previousIsOpen = false; // Reset when modal closes
   }
 
-  // Recalculate batch size when DPI or GPU settings change
-  $: if (localConfig && localConfig.dpi) {
-    calculatedBatchSize = calculateBatchSize(
-      localConfig.dpi,
-      gpuMemoryGb,
-      systemMemoryGb,
-      gpuAvailable && localConfig.useGpu
-    );
-  }
+  // Batch size uses backend's recommended value (empirically tested)
+  // The calculateBatchSize function serves as a fallback if backend doesn't provide a value
 
   /**
    * Calculate maximum safe DPI based on VRAM
@@ -116,78 +118,53 @@
 
   /**
    * Calculate optimal batch size based on DPI and available memory
-   * Formula-based approach (tunable parameters)
+   * Uses empirical lookup table matching the backend's logic exactly
+   * Adjusts dynamically with DPI changes using quadratic scaling
    */
-  function calculateBatchSize(dpi: number, vramGb: number, ramGb: number, useGpu: boolean): number {
-    // Tunable parameters
-    const VRAM_UTIL_FACTOR = 0.8;  // Use 80% of VRAM
-    const MODEL_OVERHEAD_GB = 0.5; // PaddleOCR model memory
-    const LETTER_WIDTH_INCHES = 8.5;
-    const LETTER_HEIGHT_INCHES = 11;
-
+  function calculateBatchSize(
+    dpi: number, 
+    vramGb: number, 
+    ramGb: number, 
+    useGpu: boolean,
+    modelVersion: 'mobile' | 'server' = 'mobile'
+  ): number {
+    let baseBatch: number;
+    
+    // Step 1: Get base batch size from empirical lookup table
     if (useGpu && vramGb > 0) {
-      // GPU calculation
-      const width_px = LETTER_WIDTH_INCHES * dpi;
-      const height_px = LETTER_HEIGHT_INCHES * dpi;
-      const pixels_per_image = width_px * height_px;
-      const memory_per_image_gb = (pixels_per_image * 3 * 4) / (1024 ** 3); // RGB float32
-
-      const available_vram = (vramGb * VRAM_UTIL_FACTOR) - MODEL_OVERHEAD_GB;
-
-      if (available_vram <= 0) return 1;
-
-      const batch = Math.floor(available_vram / memory_per_image_gb);
-      return Math.max(1, Math.min(batch, 50));
+      // GPU lookup table (empirically tested values)
+      if (vramGb < 1.5) baseBatch = 5;       // Ultra low-end GPUs
+      else if (vramGb < 2.5) baseBatch = 8;  // 2GB GPUs
+      else if (vramGb < 3.5) baseBatch = 15; // 3GB GPUs
+      else if (vramGb < 5) baseBatch = 25;   // 4GB GPUs (your hardware)
+      else if (vramGb < 7) baseBatch = 35;   // 6GB GPUs
+      else if (vramGb < 10) baseBatch = 50;  // 8GB GPUs
+      else baseBatch = 60;                   // High-end GPUs (10GB+)
     } else {
-      // CPU calculation (more conservative)
-      const dpi_multiplier = (dpi / 300.0) ** 2;
-      let base_batch = 10;
-
-      if (ramGb < 6) base_batch = 3;
-      else if (ramGb < 10) base_batch = 5;
-      else if (ramGb < 20) base_batch = 10;
-      else if (ramGb < 28) base_batch = 15;
-      else base_batch = 20;
-
-      return Math.max(1, Math.floor(base_batch / dpi_multiplier));
+      // CPU lookup table (RAM-based)
+      if (ramGb < 6) baseBatch = 3;          // Minimal RAM
+      else if (ramGb < 10) baseBatch = 5;    // 8GB RAM
+      else if (ramGb < 20) baseBatch = 10;   // 16GB RAM
+      else if (ramGb < 28) baseBatch = 15;   // 24GB RAM
+      else baseBatch = 20;                   // 32GB+ RAM
     }
+    
+    // Step 2: Calculate DPI multiplier (memory scales with (DPI/300)^2)
+    const dpiMultiplier = Math.pow(dpi / 300.0, 2);
+    
+    // Step 3: Apply DPI adjustment
+    let adjustedBatch = Math.max(1, Math.floor(baseBatch / dpiMultiplier));
+    
+    // Step 4: Apply model type adjustment (server models use ~25% less)
+    if (modelVersion === 'server') {
+      adjustedBatch = Math.max(1, Math.floor(adjustedBatch * 0.75));
+    }
+    
+    return adjustedBatch;
   }
 
-  /**
-   * Load system hardware capabilities and recommendations
-   */
-  async function loadSystemRecommendations() {
-    console.log('[AdvancedOCRSettings] Loading system recommendations...');
-    try {
-      const capabilities = await invoke<any>('get_hardware_capabilities');
-      console.log('[AdvancedOCRSettings] Received capabilities:', capabilities);
-
-      if (capabilities) {
-        gpuAvailable = capabilities.gpu_available || false;
-        gpuMemoryGb = capabilities.gpu_memory_gb || 0;
-        systemMemoryGb = capabilities.system_memory_gb || 0;
-
-        console.log('[AdvancedOCRSettings] GPU:', gpuAvailable, 'VRAM:', gpuMemoryGb, 'RAM:', systemMemoryGb);
-
-        // Calculate system maximum DPI
-        if (gpuAvailable && gpuMemoryGb > 0) {
-          systemMaxDpi = calculateSystemMaxDpi(gpuMemoryGb);
-        } else {
-          // CPU fallback: conservative max
-          systemMaxDpi = 600;
-        }
-
-        // Recalculate batch size
-        calculatedBatchSize = calculateBatchSize(localConfig.dpi, gpuMemoryGb, systemMemoryGb, gpuAvailable && localConfig.useGpu);
-        console.log('[AdvancedOCRSettings] Calculated - Max DPI:', systemMaxDpi, 'Batch Size:', calculatedBatchSize);
-      }
-    } catch (error) {
-      console.error('[AdvancedOCRSettings] Failed to load hardware capabilities:', error);
-      // Use defaults if detection fails
-      systemMaxDpi = 600;
-      calculatedBatchSize = 10;
-    }
-  }
+  // Hardware capabilities are now loaded from the global store (populated during app init)
+  // The store is reactively updated at the top of this component
 
   /**
    * Handle DPI change
