@@ -33,7 +33,7 @@ class OCRConfig:
 
     # Language settings
     languages: List[str] = field(default_factory=lambda: ["en"])  # Language code (en for English)
-    model_version: str = "mobile"  # "server" or "mobile" - preferred model version
+    model_version: str = "server"  # "server" or "mobile" - server has better quality
 
     # Processing settings
     batch_size: int = 10  # Pages to process at once

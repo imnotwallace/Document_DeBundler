@@ -177,9 +177,15 @@ class PreprocessingStrategySelector:
 
         # Handle blur
         if metrics.is_blurry:
-            # Use sharpening for blurry images (ADVANCED_DEBLUR disabled - degrades OCR on photos)
-            techniques.add(PreprocessingTechnique.SHARPEN)
-            logger.debug("Added SHARPEN (blurry image)")
+            # Use advanced deblur for scans/documents, sharpen for photos
+            if metrics.document_type in [DocumentType.SCAN_LOW_QUALITY, 
+                                        DocumentType.SCAN_HIGH_QUALITY,
+                                        DocumentType.DIGITAL_BORN]:
+                techniques.add(PreprocessingTechnique.ADVANCED_DEBLUR)
+                logger.debug("Added ADVANCED_DEBLUR (blurry scan/document)")
+            else:
+                techniques.add(PreprocessingTechnique.SHARPEN)
+                logger.debug("Added SHARPEN (blurry photo)")
 
         # Document type-specific techniques
         if metrics.document_type == DocumentType.RECEIPT:

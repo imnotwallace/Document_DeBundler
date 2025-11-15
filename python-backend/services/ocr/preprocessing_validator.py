@@ -70,9 +70,9 @@ class PreprocessingValidator:
 
     def __init__(
         self,
-        min_quality_improvement: float = 5.0,
-        min_ssim: float = 0.85,
-        max_noise_increase: float = 10.0
+        min_quality_improvement: float = 5.0,  # Reverted from 2.0
+        min_ssim: float = 0.85,  # Reverted from 0.75
+        max_noise_increase: float = 10.0  # Reverted from 20.0
     ):
         """
         Initialize validator with thresholds.
@@ -192,13 +192,43 @@ class PreprocessingValidator:
             from skimage.metrics import structural_similarity
 
             # Convert to grayscale if needed
+            import cv2
+            
+            # Handle original image
             if len(original.shape) == 3:
-                import cv2
-                original_gray = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY)
-                preprocessed_gray = cv2.cvtColor(preprocessed, cv2.COLOR_RGB2GRAY)
-            else:
+                if original.shape[2] == 1:
+                    # Grayscale with channel dimension - squeeze it
+                    original_gray = original.squeeze()
+                elif original.shape[2] in (3, 4):
+                    # RGB or RGBA - convert to grayscale
+                    original_gray = cv2.cvtColor(original, cv2.COLOR_RGB2GRAY)
+                else:
+                    logger.warning(f"Unexpected number of channels in original: {original.shape[2]}")
+                    return 1.0
+            elif len(original.shape) == 2:
+                # Already grayscale
                 original_gray = original
+            else:
+                logger.warning(f"Unexpected original image shape: {original.shape}")
+                return 1.0
+            
+            # Handle preprocessed image
+            if len(preprocessed.shape) == 3:
+                if preprocessed.shape[2] == 1:
+                    # Grayscale with channel dimension - squeeze it
+                    preprocessed_gray = preprocessed.squeeze()
+                elif preprocessed.shape[2] in (3, 4):
+                    # RGB or RGBA - convert to grayscale
+                    preprocessed_gray = cv2.cvtColor(preprocessed, cv2.COLOR_RGB2GRAY)
+                else:
+                    logger.warning(f"Unexpected number of channels in preprocessed: {preprocessed.shape[2]}")
+                    return 1.0
+            elif len(preprocessed.shape) == 2:
+                # Already grayscale
                 preprocessed_gray = preprocessed
+            else:
+                logger.warning(f"Unexpected preprocessed image shape: {preprocessed.shape}")
+                return 1.0
 
             # Ensure same dimensions
             if original_gray.shape != preprocessed_gray.shape:
@@ -298,8 +328,8 @@ class PreprocessingValidator:
 def validate_preprocessing(
     original: np.ndarray,
     preprocessed: np.ndarray,
-    min_quality_improvement: float = 5.0,
-    min_ssim: float = 0.85
+    min_quality_improvement: float = 2.0,
+    min_ssim: float = 0.75
 ) -> ValidationResult:
     """
     Convenience function to validate preprocessing.

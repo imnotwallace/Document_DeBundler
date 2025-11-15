@@ -327,6 +327,10 @@ impl PythonProcess {
                                 // Broadcast language download progress to frontend
                                 let _ = app_handle.emit("language-download-progress", event.clone());
                             }
+                            "file_status" => {
+                                // Broadcast file status to frontend
+                                let _ = app_handle.emit("python_file_status", event.clone());
+                            }
                             "result" | "error" => {
                                 // Check if this is a response to a pending request
                                 if let Some(ref request_id) = event.request_id {
@@ -456,6 +460,12 @@ impl PythonProcess {
 
                 // Small delay to prevent tight loop
                 tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            // CRITICAL: Clear event loop handle when loop exits to break reference cycle
+            if let Ok(mut internals) = internals_clone.lock() {
+                internals.event_loop_handle = None;
+                eprintln!("[INFO] Event loop handle cleared on exit");
             }
 
             eprintln!("Python event loop terminated");
@@ -603,7 +613,7 @@ impl PythonProcess {
     /// Marks the process as cancelled
     ///
     /// This updates the state to `Cancelled` which will cause the event loop
-    /// to terminate gracefully.
+    /// to terminate gracefully. Also clears all pending requests.
     pub fn set_cancelled(&self) -> Result<(), String> {
         let mut internals = self
             .internals
@@ -611,6 +621,18 @@ impl PythonProcess {
             .map_err(|e| format!("Failed to acquire lock: {}", e))?;
 
         internals.state = ProcessState::Cancelled;
+
+        // CRITICAL: Clear all pending requests to prevent memory leak
+        // Send cancellation error to all waiting handlers
+        let pending_count = internals.pending_requests.len();
+        if pending_count > 0 {
+            eprintln!("[INFO] Clearing {} pending requests due to cancellation", pending_count);
+            for (request_id, _sender) in internals.pending_requests.drain() {
+                eprintln!("[DEBUG] Dropped pending request: {}", request_id);
+                // oneshot::Sender is dropped here, receivers will get Err(RecvError)
+            }
+        }
+
         Ok(())
     }
 
@@ -634,6 +656,15 @@ impl PythonProcess {
             if let Some(handle) = internals.event_loop_handle.take() {
                 eprintln!("Aborting event loop task");
                 handle.abort();
+            }
+
+            // CRITICAL: Clear all pending requests to prevent memory leak
+            let pending_count = internals.pending_requests.len();
+            if pending_count > 0 {
+                eprintln!("[INFO] Clearing {} pending requests during stop", pending_count);
+                for (request_id, _sender) in internals.pending_requests.drain() {
+                    eprintln!("[DEBUG] Dropped pending request: {}", request_id);
+                }
             }
 
             // Kill the child process

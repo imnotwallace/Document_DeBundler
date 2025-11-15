@@ -1394,34 +1394,72 @@ class OCRBatchService:
                 image_height = int(page_rect.height * dpi / 72)
                 logger.debug(f"Using calculated dimensions from page_rect: {image_width}x{image_height}")
             
-            # Insert each text line with insert_text()
+            # CRITICAL FIX: Process ALL text lines, not just those with bounding boxes
+            # Previous code used zip() which silently dropped text without matching bboxes
             inserted_count = 0
             failed_count = 0
-            
-            for text_line, bbox in zip(text_lines, bboxes):
+            skipped_no_bbox = 0
+
+            # Warn if mismatch between text lines and bounding boxes
+            if len(text_lines) != len(bboxes):
+                logger.warning(
+                    f"Mismatch: {len(text_lines)} text lines but {len(bboxes)} bounding boxes. "
+                    f"Will process all text, using fallback for lines without bboxes."
+                )
+
+            # Process ALL text lines (iterate by index to handle mismatches)
+            for i, text_line in enumerate(text_lines):
                 if not text_line or not text_line.strip():
                     continue
-                
-                # Convert bbox to PDF coordinates
-                pdf_bbox = mapper.image_to_pdf_coords(
-                    bbox=bbox,
-                    image_width=image_width,
-                    image_height=image_height,
-                    page_rect=page_rect,
-                    image_dpi=dpi
-                )
-                
-                # FIXED: Use insert_text() with bbox
-                success = self._insert_text_with_bbox(page, text_line, pdf_bbox, page_rect)
-                if success:
-                    inserted_count += 1
+
+                # Check if we have a bounding box for this text line
+                if i < len(bboxes):
+                    bbox = bboxes[i]
+
+                    # Convert bbox to PDF coordinates
+                    pdf_bbox = mapper.image_to_pdf_coords(
+                        bbox=bbox,
+                        image_width=image_width,
+                        image_height=image_height,
+                        page_rect=page_rect,
+                        image_dpi=dpi
+                    )
+
+                    # Insert with coordinate mapping
+                    success = self._insert_text_with_bbox(page, text_line, pdf_bbox, page_rect)
+                    if success:
+                        inserted_count += 1
+                    else:
+                        failed_count += 1
                 else:
-                    failed_count += 1
-            
+                    # No bounding box available - this text would have been DROPPED by old code!
+                    logger.debug(f"Text line {i+1} has no bbox, will be included in fallback text")
+                    skipped_no_bbox += 1
+
             logger.info(
                 f"Coordinate mapping: {inserted_count} positioned text elements inserted, "
-                f"{failed_count} failed"
+                f"{failed_count} failed, {skipped_no_bbox} without bboxes"
             )
+
+            # CRITICAL FIX: If some text had no bounding boxes, append it using fallback
+            if skipped_no_bbox > 0:
+                # Collect text lines that didn't have bounding boxes
+                text_without_bboxes = []
+                for i, text_line in enumerate(text_lines):
+                    if i >= len(bboxes) and text_line.strip():
+                        text_without_bboxes.append(text_line.strip())
+
+                if text_without_bboxes:
+                    combined_text = "\n".join(text_without_bboxes)
+                    logger.warning(
+                        f"Adding {len(text_without_bboxes)} text lines without bboxes "
+                        f"({len(combined_text)} chars) using TextWriter fallback"
+                    )
+                    success = self._insert_text_fallback(page, combined_text, page_rect)
+                    if success:
+                        logger.info(f"Successfully inserted {len(combined_text)} chars without coordinate mapping")
+                    else:
+                        logger.error(f"Failed to insert text without bboxes!")
             
         except Exception as e:
             logger.warning(f"Coordinate mapping failed: {e}, using TextWriter fallback")

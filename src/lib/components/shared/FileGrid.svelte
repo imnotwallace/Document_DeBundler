@@ -25,8 +25,8 @@
    */
   function getStatusClass(status: OCRQueueItem['status']): string {
     switch (status) {
-      case 'pending':
-        return 'bg-gray-600 text-gray-200';
+      case 'queued':
+        return 'bg-yellow-600 text-white';
       case 'processing':
         return 'bg-blue-600 text-white';
       case 'complete':
@@ -36,6 +36,32 @@
       default:
         return 'bg-gray-600 text-gray-200';
     }
+  }
+
+  /**
+   * Format elapsed time in seconds to MM:SS or HH:MM:SS
+   */
+  function formatElapsedTime(seconds?: number): string {
+    if (!seconds || seconds < 0) return '';
+
+    const hours = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+
+    if (hours > 0) {
+      return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  }
+
+  /**
+   * Get time waiting in queue (from queuedAt to now or startedAt)
+   */
+  function getTimeWaiting(queuedAt?: number, startedAt?: number): string {
+    if (!queuedAt) return '';
+    const endTime = startedAt || Date.now();
+    const waitSeconds = (endTime - queuedAt) / 1000;
+    return formatElapsedTime(waitSeconds);
   }
 
   /**
@@ -164,16 +190,42 @@
             {formatSize(item.size)}
           </div>
 
-          <!-- Status Badge -->
-          <div class="flex justify-center">
-            <span
-              class="px-2 py-1 rounded text-xs font-medium {getStatusClass(item.status)}"
-            >
-              {getStatusText(item.status)}
-              {#if item.status === 'processing'}
-                <span class="inline-block animate-spin ml-1">⟳</span>
-              {/if}
-            </span>
+          <!-- Status Badge with Timing -->
+          <div class="flex flex-col items-center gap-1">
+            <div class="flex items-center gap-2">
+              <span
+                class="px-2 py-1 rounded text-xs font-medium {getStatusClass(item.status)}"
+              >
+                {getStatusText(item.status)}
+                {#if item.status === 'processing'}
+                  <span class="inline-block animate-spin ml-1">⟳</span>
+                {/if}
+              </span>
+            </div>
+
+            <!-- Timing information -->
+            {#if item.status === 'queued' && item.queuedAt}
+              <span class="text-xs text-gray-400">
+                Waiting: {getTimeWaiting(item.queuedAt)}
+              </span>
+            {/if}
+
+            {#if item.status === 'processing'}
+              <div class="flex flex-col items-center text-xs text-gray-400">
+                {#if item.elapsedTime}
+                  <span>{formatElapsedTime(item.elapsedTime)}</span>
+                {/if}
+                {#if item.currentPage && item.totalPages}
+                  <span>Page {item.currentPage}/{item.totalPages}</span>
+                {/if}
+              </div>
+            {/if}
+
+            {#if item.status === 'complete' && item.elapsedTime}
+              <span class="text-xs text-green-400">
+                {formatElapsedTime(item.elapsedTime)}
+              </span>
+            {/if}
           </div>
         </div>
       {/each}

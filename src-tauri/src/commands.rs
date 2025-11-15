@@ -170,9 +170,6 @@ pub async fn get_file_info(file_path: String, app: tauri::AppHandle, state: Stat
 /// Gets the page count of a PDF file via Python backend
 #[tauri::command]
 pub async fn get_pdf_page_count(file_path: String, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<Option<u32>, String> {
-    use std::time::Duration;
-    use tokio::time::timeout;
-
     // Validate file path
     let path = PathBuf::from(&file_path);
     if !path.exists() {
@@ -188,68 +185,55 @@ pub async fn get_pdf_page_count(file_path: String, app: tauri::AppHandle, state:
             .map_err(|e| format!("Failed to lock process: {}", e))?;
 
         if !process.is_running() {
-            // Start Python process
             let script_path = get_python_script_path(&app)?;
             process.start(&script_path)?;
         }
     }
 
-    // Send analyze command
+    // Start event loop if needed
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Send analyze command with proper request correlation
     let command = PythonCommand {
         command: "analyze".to_string(),
         file_path: Some(file_path.clone()),
         options: None,
-        request_id: None,
+        request_id: None,  // Will be set by send_command_and_wait
     };
 
-    {
+    // Clone the process to avoid holding lock across await
+    let temp_process = {
         let process = state.python_process.lock()
             .map_err(|e| format!("Failed to lock process: {}", e))?;
-        process.send_command(command)?;
-    }
+        process.clone_ref()
+    };
 
-    // Wait for result with timeout (30 seconds should be enough for analysis)
-    let result = timeout(Duration::from_secs(30), async {
-        loop {
-            let event = {
-                let process = state.python_process.lock()
-                    .map_err(|e| format!("Failed to lock process: {}", e))?;
-                process.read_event()?
-            };
+    // Wait up to 30 seconds for analysis to complete
+    let event = temp_process.send_command_and_wait(command, 30).await?;
 
-            if let Some(evt) = event {
-                match evt.event_type.as_str() {
-                    "result" => {
-                        // Extract page count from result
-                        if let Some(total_pages) = evt.data.get("total_pages") {
-                            if let Some(count) = total_pages.as_u64() {
-                                return Ok(Some(count as u32));
-                            }
-                        }
-                        return Ok(None);
-                    }
-                    "error" => {
-                        let msg = evt.data.get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Unknown error");
-                        return Err(format!("Python error: {}", msg));
-                    }
-                    _ => {
-                        // Ignore progress events
-                        continue;
-                    }
+    match event.event_type.as_str() {
+        "result" => {
+            // Extract page count from result
+            if let Some(total_pages) = event.data.get("total_pages") {
+                if let Some(count) = total_pages.as_u64() {
+                    return Ok(Some(count as u32));
                 }
             }
-
-            // Small delay to prevent busy waiting
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(None)
         }
-    }).await;
-
-    match result {
-        Ok(Ok(page_count)) => Ok(page_count),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("Timeout waiting for page count".to_string()),
+        "error" => {
+            let msg = event.data.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            Err(format!("Python error: {}", msg))
+        }
+        _ => Err(format!("Unexpected event type: {}", event.event_type))
     }
 }
 
@@ -585,6 +569,68 @@ pub async fn get_hardware_capabilities(
                 .and_then(|m| m.as_str())
                 .unwrap_or("Unknown error");
             Err(format!("Python error: {}", msg))
+        }
+        _ => Err(format!("Unexpected event type: {}", event.event_type))
+    }
+}
+
+/// Initialize OCR engines for instant processing
+/// Pre-loads PaddleOCR models and initializes CUDA (30-60 seconds)
+/// This should be called when entering the OCR module for the first time
+#[tauri::command]
+pub async fn initialize_ocr(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    config: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    // Ensure Python process is started
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+
+        if !process.is_running() {
+            let script_path = get_python_script_path(&app)?;
+            process.start(&script_path)?;
+        }
+    }
+
+    // Start event loop
+    {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        if process.is_running() {
+            process.start_event_loop(app.clone())?;
+        }
+    }
+
+    // Send command with config and wait for response
+    let command = PythonCommand {
+        command: "initialize_ocr".to_string(),
+        file_path: None,
+        options: config,  // Pass OCR configuration
+        request_id: None,  // Will be set by send_command_and_wait
+    };
+
+    // Clone the process to avoid holding lock across await
+    let temp_process = {
+        let process = state.python_process.lock()
+            .map_err(|e| format!("Failed to lock process: {}", e))?;
+        process.clone_ref()
+    };
+
+    // Wait longer for OCR initialization (up to 120 seconds for model loading)
+    let event = temp_process.send_command_and_wait(command, 120).await?;
+
+    match event.event_type.as_str() {
+        "result" => {
+            // Return the initialization result
+            Ok(event.data)
+        }
+        "error" => {
+            let msg = event.data.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            Err(format!("OCR initialization failed: {}", msg))
         }
         _ => Err(format!("Unexpected event type: {}", event.event_type))
     }

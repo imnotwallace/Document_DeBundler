@@ -21,10 +21,10 @@ export function addToQueue(file: Omit<OCRQueueItem, 'id' | 'status'>): void {
   const newItem: OCRQueueItem = {
     ...file,
     id: crypto.randomUUID(),
-    status: 'pending',
+    status: 'queued',
     progress: 0
   };
-  
+
   ocrQueue.update(queue => [...queue, newItem]);
 }
 
@@ -36,10 +36,10 @@ export function addMultipleToQueue(files: Omit<OCRQueueItem, 'id' | 'status'>[])
   const newItems: OCRQueueItem[] = files.map(file => ({
     ...file,
     id: crypto.randomUUID(),
-    status: 'pending',
+    status: 'queued',
     progress: 0
   }));
-  
+
   ocrQueue.update(queue => [...queue, ...newItems]);
 }
 
@@ -64,7 +64,7 @@ export function updateFileStatus(
   progress?: number,
   error?: string
 ): void {
-  ocrQueue.update(queue => 
+  ocrQueue.update(queue =>
     queue.map(item => {
       if (item.id === id) {
         return {
@@ -72,6 +72,41 @@ export function updateFileStatus(
           status,
           progress: progress ?? item.progress,
           error
+        };
+      }
+      return item;
+    })
+  );
+}
+
+/**
+ * Update file status with detailed timing information
+ * Used by file_status events from Python backend
+ * @param filePath File path (used to find the queue item)
+ * @param status New status
+ * @param updates Timing and progress updates
+ */
+export function updateFileStatusDetailed(
+  filePath: string,
+  status: OCRQueueItem['status'],
+  updates: {
+    queuedAt?: number;
+    startedAt?: number;
+    completedAt?: number;
+    elapsedTime?: number;
+    currentPage?: number;
+    totalPages?: number;
+    progress?: number;
+    error?: string;
+  }
+): void {
+  ocrQueue.update(queue =>
+    queue.map(item => {
+      if (item.filePath === filePath) {
+        return {
+          ...item,
+          status,
+          ...updates
         };
       }
       return item;
@@ -97,7 +132,7 @@ export function getQueue(): OCRQueueItem[] {
  * Get count of files by status
  */
 export function getStatusCounts(): {
-  pending: number;
+  queued: number;
   processing: number;
   complete: number;
   failed: number;
@@ -105,7 +140,7 @@ export function getStatusCounts(): {
 } {
   const queue = get(ocrQueue);
   return {
-    pending: queue.filter(f => f.status === 'pending').length,
+    queued: queue.filter(f => f.status === 'queued').length,
     processing: queue.filter(f => f.status === 'processing').length,
     complete: queue.filter(f => f.status === 'complete').length,
     failed: queue.filter(f => f.status === 'failed').length,
@@ -179,8 +214,8 @@ export const sortedQueue = derived(
           comparison = a.size - b.size;
           break;
         case 'status':
-          // Sort by status: pending < processing < complete < failed
-          const statusOrder = { pending: 0, processing: 1, complete: 2, failed: 3 };
+          // Sort by status: queued < processing < complete < failed
+          const statusOrder = { queued: 0, processing: 1, complete: 2, failed: 3 };
           comparison = statusOrder[a.status] - statusOrder[b.status];
           break;
       }

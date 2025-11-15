@@ -33,6 +33,7 @@ fn main() {
             cancel_batch_ocr,
             get_processing_status,
             get_hardware_capabilities,
+            initialize_ocr,
             list_available_languages,
             list_installed_languages,
             get_language_status,

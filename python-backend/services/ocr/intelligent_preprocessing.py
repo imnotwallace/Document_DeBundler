@@ -241,14 +241,11 @@ class IntelligentPreprocessor:
         """
         import cv2
 
-        # Work on a copy
-        processed = image.copy()
-
-        # Convert to grayscale for processing
-        if len(processed.shape) == 3:
-            gray = cv2.cvtColor(processed, cv2.COLOR_RGB2GRAY)
+        # Convert to grayscale for processing (no unnecessary copy)
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         else:
-            gray = processed.copy()
+            gray = image.copy()  # Only copy if already grayscale
 
         # Apply each technique in order
         for technique in techniques:

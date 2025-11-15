@@ -745,12 +745,12 @@ def get_quality_preset(
         )
     
     elif preset == QualityPreset.HIGH:
-        # High: 600 DPI, aggressive tuning
+        # High: 600 DPI, balanced tuning (Phase 2 optimized)
         target_dpi = 600
         engine_settings = {
-            'text_det_box_thresh': 0.3,      # Very sensitive detection
+            'text_det_box_thresh': 0.28,     # Lowered to detect more text regions
             'text_det_unclip_ratio': 2.2,    # Maximum expansion
-            'text_rec_score_thresh': 0.3,    # Accept lower confidence
+            'text_rec_score_thresh': 0.5,    # Raised to filter low-confidence garbage
             'text_det_thresh': 0.2,          # Lower detection threshold
         }
         batch_size = get_optimal_batch_size(
@@ -761,12 +761,12 @@ def get_quality_preset(
         )
     
     elif preset == QualityPreset.MAXIMUM:
-        # Maximum: 1200 DPI, aggressive tuning
+        # Maximum: 1200 DPI, balanced tuning (Phase 2 optimized)
         target_dpi = 1200
         engine_settings = {
-            'text_det_box_thresh': 0.3,      # Very sensitive detection
+            'text_det_box_thresh': 0.28,     # Lowered to detect more text regions
             'text_det_unclip_ratio': 2.2,    # Maximum expansion
-            'text_rec_score_thresh': 0.3,    # Accept lower confidence
+            'text_rec_score_thresh': 0.5,    # Raised to filter low-confidence garbage
             'text_det_thresh': 0.2,          # Lower detection threshold
         }
         batch_size = get_optimal_batch_size(

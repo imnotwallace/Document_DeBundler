@@ -26,6 +26,7 @@ class IPCHandler:
         self.cancelled = False
         self.current_request_id = None
         self._hardware_cache = None  # Cache for hardware capabilities (avoid 20s CUDA init on every call)
+        self._ocr_service_cache = None  # Cache for initialized OCR service (avoid 30-60s init on every call)  # Cache for hardware capabilities (avoid 20s CUDA init on every call)
 
     def send_event(self, event_type: str, data: Any, request_id: str = None):
         """Send an event to the frontend via stdout"""
@@ -51,7 +52,7 @@ class IPCHandler:
             "total": total,
             "message": message,
             "percent": percent
-        })
+        }, request_id=self.current_request_id)
 
     def send_result(self, result: Any):
         """Send processing result"""
@@ -60,6 +61,38 @@ class IPCHandler:
     def send_error(self, error_message: str):
         """Send error message"""
         self.send_event("error", {"message": error_message}, request_id=self.current_request_id)
+
+    def send_file_status(
+        self,
+        file_path: str,
+        file_name: str,
+        file_index: int,
+        total_files: int,
+        status: str,
+        queued_at: float = None,
+        started_at: float = None,
+        completed_at: float = None,
+        elapsed_time: float = None,
+        current_page: int = None,
+        total_pages: int = None,
+        error: str = None
+    ):
+        """Send detailed file status update with timing information"""
+        data = {
+            "file_path": file_path,
+            "file_name": file_name,
+            "file_index": file_index,
+            "total_files": total_files,
+            "status": status,
+            "queued_at": queued_at,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "elapsed_time": elapsed_time,
+            "current_page": current_page,
+            "total_pages": total_pages,
+            "error": error
+        }
+        self.send_event("file_status", data, request_id=self.current_request_id)
 
     def handle_command(self, command: Dict[str, Any]):
         """Process incoming command"""
@@ -76,6 +109,8 @@ class IPCHandler:
             self.handle_ocr_batch(command)
         elif cmd_type == "get_hardware_capabilities":
             self.handle_get_hardware_capabilities(command)
+        elif cmd_type == "initialize_ocr":
+            self.handle_initialize_ocr(command)
         elif cmd_type == "list_available_languages":
             self.handle_list_available_languages(command)
         elif cmd_type == "list_installed_languages":
@@ -523,13 +558,45 @@ class IPCHandler:
 
                 # Send progress event
                 self.send_progress(current, total, message, percent)
+            
+            # Create file status callback
+            def file_status_callback(
+                file_path: str,
+                file_name: str,
+                file_index: int,
+                total_files: int,
+                status: str,
+                queued_at: float = None,
+                started_at: float = None,
+                completed_at: float = None,
+                elapsed_time: float = None,
+                current_page: int = None,
+                total_pages: int = None,
+                error: str = None
+            ):
+                self.send_file_status(
+                    file_path=file_path,
+                    file_name=file_name,
+                    file_index=file_index,
+                    total_files=total_files,
+                    status=status,
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    elapsed_time=elapsed_time,
+                    current_page=current_page,
+                    total_pages=total_pages,
+                    error=error
+                )
 
             # Create service instance with OCR configuration
             # Note: Cancellation is handled via progress_callback raising exception
             service = OCRBatchService(
                 progress_callback=progress_callback,
+                file_status_callback=file_status_callback,
                 cancellation_flag=None,
-                ocr_config=ocr_config  # Pass OCR config from frontend
+                ocr_config=ocr_config,  # Pass OCR config from frontend
+                ocr_service_cache=self._ocr_service_cache  # Reuse pre-initialized OCR service
             )
 
             # Process batch
@@ -634,6 +701,88 @@ class IPCHandler:
         except Exception as e:
             error_msg = f"Failed to detect hardware capabilities: {str(e)}"
             logger.error(error_msg, exc_info=True)
+            self.send_error(error_msg)
+
+    def handle_initialize_ocr(self, command: Dict[str, Any]):
+        """
+        Pre-initialize OCR engines for instant batch processing
+        Loads PaddleOCR models and initializes CUDA (30-60 seconds)
+        Caches the initialized service for reuse
+        """
+        try:
+            from services.ocr_service import OCRService
+
+            # Check if already initialized
+            if self._ocr_service_cache is not None:
+                logger.info("OCR service already initialized, using cached instance")
+                self.send_result({
+                    'status': 'already_initialized',
+                    'message': 'OCR engines already initialized'
+                })
+                return
+
+            logger.info("Initializing OCR engines (first time - may take 30-60 seconds)...")
+
+            # Extract configuration from command
+            options = command.get('config', {})
+            
+            # Progress: Starting initialization
+            self.send_progress(0, 100, "Starting OCR initialization...")
+
+            # Progress: Loading configuration
+            self.send_progress(5, 100, "Loading OCR configuration...")
+            
+            # Initialize OCR service with configuration
+            use_gpu = options.get('use_gpu', True)
+            engine = options.get('engine', 'auto')
+            language = options.get('languages', ['en'])[0] if options.get('languages') else 'en'
+            model_version = options.get('model_version', 'server')
+
+            self.send_progress(10, 100, "Creating OCR service instance...")
+
+            # Create OCRService (lightweight)
+            service = OCRService(
+                gpu=use_gpu,
+                engine=engine,
+                language=language,
+                model_version=model_version,
+                use_pooling=False  # Direct initialization for cached service
+            )
+
+            # Progress: Starting engine initialization (SLOW PART)
+            self.send_progress(15, 100, "Initializing OCR engines (this may take 30-60 seconds)...")
+
+            # Start session - this is the slow operation that loads models and initializes CUDA
+            self.send_progress(20, 100, "Loading detection model...")
+            
+            # Note: start_session() is where the 30-60 second delay happens
+            # It internally loads PaddleOCR models and initializes CUDA
+            service.start_session()
+            
+            self.send_progress(90, 100, "OCR engine initialization complete...")
+
+            # Cache the initialized service
+            self._ocr_service_cache = service
+            logger.info("OCR service initialized and cached for future requests")
+
+            # Progress: Complete
+            self.send_progress(100, 100, "OCR initialization complete")
+
+            # Send success result
+            engine_info = service.get_engine_info()
+            self.send_result({
+                'status': 'success',
+                'message': 'OCR engines initialized successfully',
+                'engine': engine_info.get('engine', 'unknown'),
+                'using_gpu': use_gpu,
+                'language': language,
+                'model_version': model_version
+            })
+
+        except Exception as e:
+            error_msg = f"Failed to initialize OCR engines: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            self._ocr_service_cache = None  # Clear cache on failure
             self.send_error(error_msg)
 
     def handle_list_available_languages(self, command: Dict[str, Any]):

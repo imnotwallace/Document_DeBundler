@@ -93,7 +93,7 @@ class PaddleOCREngine(OCREngine):
 
                 if lang_pack:
                     rec_model_name = lang_pack.get_recognition_model_name()
-                    det_model_name = lang_pack.detection_model_name
+                    det_model_name = lang_pack.get_detection_model_name()
                     logger.info(f"Selected models - Detection: {det_model_name}, Recognition: {rec_model_name} (version: {model_version})")
                 else:
                     # Fall back to English mobile version if language not found
@@ -163,14 +163,9 @@ class PaddleOCREngine(OCREngine):
             else:
                 logger.info(f"Model directory does not exist or not configured: {self.config.model_dir}")
 
-            # Add improved default parameters for better OCR quality (PaddleOCR 3.x API)
-            # These prevent text fragmentation and improve character recognition
-            default_params = {
-                'text_det_box_thresh': 0.4,      # More sensitive text detection (default: 0.6)
-                'text_det_unclip_ratio': 2.0,    # Prevent character fragmentation (default: 1.5)
-                'text_rec_score_thresh': 0.4,    # Keep more low-confidence results (default: 0.5)
-            }
-            ocr_kwargs.update(default_params)
+            # IMPORTANT: Use PaddleOCR defaults - aggressive thresholds cause text fragmentation
+            # Custom thresholds (0.3 for box_thresh/rec_score) were causing gibberish output
+            # by detecting noise and fragmenting characters. PaddleOCR defaults work best.
             
             # Apply engine-specific settings (overrides defaults)
             ocr_kwargs.update(self.config.engine_settings)
@@ -371,6 +366,33 @@ class PaddleOCREngine(OCREngine):
                 confidence=avg_confidence,
                 bbox=bboxes if bboxes else None,
                 raw_result=result,
+                processing_time=processing_time
+            )
+
+        except MemoryError as e:
+            # Specific handling for GPU/RAM out of memory errors
+            logger.error(
+                f"OCR processing failed due to out of memory: {e}\n"
+                f"Image dimensions: {image.shape if hasattr(image, 'shape') else 'unknown'}\n"
+                f"This image is too large for available memory. The system should have "
+                f"reduced DPI before rendering - this is a safety net error.",
+                exc_info=True
+            )
+
+            # Attempt to clear GPU memory
+            if self._gpu_available:
+                try:
+                    import paddle
+                    paddle.device.cuda.empty_cache()
+                    logger.info("Cleared GPU memory cache after OOM error")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to clear GPU cache: {cleanup_error}")
+
+            processing_time = time.time() - start_time
+            return OCRResult(
+                text="",
+                confidence=0.0,
+                error=f"Out of memory error - image too large ({image.shape if hasattr(image, 'shape') else 'unknown'})",
                 processing_time=processing_time
             )
 

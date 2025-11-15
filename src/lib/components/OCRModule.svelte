@@ -9,9 +9,14 @@
     addMultipleToQueue,
     removeFromQueue,
     updateFileStatus,
+    updateFileStatusDetailed,
   } from "../stores/ocrQueue";
   import { exportOCRConfigForBackend } from "../stores/ocrConfig";
+  import { ocrInitialized, ocrInitializing } from "../stores/ocrInit";
+  import { initializeOCR } from "../services/ocrInitService";
+  import type { OcrInitProgress } from "../services/ocrInitService";
   import Button from "./shared/Button.svelte";
+  import LoadingScreen from "./LoadingScreen.svelte";
   import FileGrid from "./shared/FileGrid.svelte";
   import Terminal from "./shared/Terminal.svelte";
   import AdvancedOCRSettings from "./AdvancedOCRSettings.svelte";
@@ -44,10 +49,20 @@
   let processingProgress = 0;
   let showAdvancedSettings = false;
 
+  // OCR initialization state
+  let initProgress: OcrInitProgress = {
+    progress: 0,
+    message: "Initializing OCR...",
+    currentStep: "",
+    totalSteps: 0,
+    completedSteps: 0,
+  };
+
   // Event listener cleanup functions
   let unlistenProgress: UnlistenFn | null = null;
   let unlistenResult: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
+  let unlistenFileStatus: UnlistenFn | null = null;
 
   // Reactive statements
   $: hasSelection = selectedFileIds.length > 0;
@@ -117,11 +132,58 @@
   }
 
   /**
+   * Handle file status events from Python backend (new detailed events)
+   */
+  function handleFileStatus(event: { payload: any }) {
+    try {
+      // Access nested data field (payload structure: {type, data, request_id})
+      const data = event.payload.data;
+
+      // Validate required fields
+      if (!data || !data.file_path || !data.status) {
+        console.error('Invalid file status event payload:', event.payload);
+        addLog('ERROR: Received invalid file status event', 'error');
+        return;
+      }
+
+      // Convert Python timestamps (seconds) to JavaScript timestamps (milliseconds)
+      const updates: any = {
+        queuedAt: data.queued_at ? data.queued_at * 1000 : undefined,
+        startedAt: data.started_at ? data.started_at * 1000 : undefined,
+        completedAt: data.completed_at ? data.completed_at * 1000 : undefined,
+        elapsedTime: data.elapsed_time,
+        currentPage: data.current_page,
+        totalPages: data.total_pages,
+        error: data.error
+      };
+
+      // Update the file in the queue
+      updateFileStatusDetailed(data.file_path, data.status, updates);
+
+      // Log status changes to terminal
+      if (data.status === 'queued') {
+        addLog(`Queued: ${data.file_name} (${data.file_index}/${data.total_files})`, 'info');
+      } else if (data.status === 'processing') {
+        addLog(`Processing: ${data.file_name}`, 'info');
+      } else if (data.status === 'complete') {
+        const timeStr = data.elapsed_time ? ` in ${data.elapsed_time.toFixed(1)}s` : '';
+        addLog(`✓ Completed: ${data.file_name}${timeStr}`, 'success');
+      } else if (data.status === 'failed') {
+        addLog(`ERROR: Failed: ${data.file_name} - ${data.error}`, 'error');
+      }
+    } catch (error) {
+      console.error('Error handling file status event:', error, event);
+      addLog(`ERROR: Failed to process file status update: ${error}`, 'error');
+    }
+  }
+
+  /**
    * Update file status by filename (helper function)
+   * Used by legacy progress events for backward compatibility
    */
   function updateFileStatusByName(
     filename: string,
-    status: 'pending' | 'processing' | 'complete' | 'failed',
+    status: 'queued' | 'processing' | 'complete' | 'failed',
     progress?: number
   ) {
     // Find file by name and update its status
@@ -322,6 +384,25 @@
   onMount(async () => {
     addLog("OCR Module initialized", 'info');
 
+    // Check if OCR engines need initialization
+    if (!$ocrInitialized && !$ocrInitializing) {
+      addLog("Initializing OCR engines (first time - may take 30-60 seconds)...", 'info');
+      
+      try {
+        await initializeOCR((progress) => {
+          initProgress = progress;
+        });
+        
+        addLog("OCR engines initialized successfully", 'success');
+      } catch (error) {
+        console.error('OCR initialization failed:', error);
+        addLog(`ERROR: OCR initialization failed: ${error}`, 'error');
+        // Continue anyway - OCR will lazy-initialize on first use
+      }
+    } else if ($ocrInitialized) {
+      addLog("OCR engines already initialized", 'info');
+    }
+
     try {
       // Listen to progress events from Python backend
       unlistenProgress = await listen('python_progress', handleProgress);
@@ -334,6 +415,10 @@
       // Listen to error events
       unlistenError = await listen('python_error', handleError);
       addLog('Event listener registered: python_error', 'info');
+
+      // Listen to file status events (detailed status with timing)
+      unlistenFileStatus = await listen('python_file_status', handleFileStatus);
+      addLog('Event listener registered: python_file_status', 'info');
     } catch (error) {
       console.error('Failed to setup event listeners:', error);
       addLog(`ERROR: Failed to setup event listeners: ${error}`, 'error');
@@ -359,9 +444,25 @@
       unlistenError();
       unlistenError = null;
     }
+
+    if (unlistenFileStatus) {
+      unlistenFileStatus();
+      unlistenFileStatus = null;
+    }
   });
 </script>
 
+{#if $ocrInitializing}
+  <!-- Show loading screen during OCR initialization -->
+  <LoadingScreen
+    progress={initProgress.progress}
+    message={initProgress.message}
+    currentStep={initProgress.currentStep}
+    totalSteps={initProgress.totalSteps}
+    completedSteps={initProgress.completedSteps}
+  />
+{:else}
+<!-- Main OCR Module UI -->
 <div class="h-full flex flex-col bg-white dark:bg-gray-900">
   <!-- Header -->
   <div
@@ -509,6 +610,7 @@
     </div>
   </div>
 </div>
+{/if}
 
 <!-- Advanced OCR Settings Modal -->
 <AdvancedOCRSettings

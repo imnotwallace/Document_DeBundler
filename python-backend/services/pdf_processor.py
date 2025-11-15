@@ -135,7 +135,41 @@ class PDFProcessor:
 
         page = self.doc[page_num]
 
-        # Render page to image
+        # Calculate expected dimensions to prevent OOM errors
+        rect = page.rect
+        expected_width = int(rect.width * dpi / 72)
+        expected_height = int(rect.height * dpi / 72)
+        expected_pixels = expected_width * expected_height
+        expected_mb = (expected_pixels * 3) / (1024 ** 2)
+
+        # Safety limits to prevent GPU/RAM exhaustion
+        MAX_DIMENSION = 18000  # From adaptive_max_side_limit
+        MAX_MEMORY_MB = 1000  # 1GB safety limit per page
+
+        # Check if dimensions exceed safe limits
+        if expected_width > MAX_DIMENSION or expected_height > MAX_DIMENSION:
+            logger.warning(
+                f"Page {page_num + 1} dimensions too large: {expected_width}x{expected_height}px "
+                f"(max: {MAX_DIMENSION}px). Reducing DPI to fit."
+            )
+            # Calculate reduced DPI to fit within dimension limits
+            scale_factor = MAX_DIMENSION / max(expected_width, expected_height)
+            adjusted_dpi = int(dpi * scale_factor)
+            logger.info(f"Adjusted DPI from {dpi} to {adjusted_dpi} for page {page_num + 1}")
+            dpi = adjusted_dpi
+
+        elif expected_mb > MAX_MEMORY_MB:
+            logger.warning(
+                f"Page {page_num + 1} estimated memory too large: {expected_mb:.1f}MB "
+                f"(max: {MAX_MEMORY_MB}MB). Reducing DPI."
+            )
+            # Calculate reduced DPI to fit within memory limits
+            scale_factor = (MAX_MEMORY_MB / expected_mb) ** 0.5
+            adjusted_dpi = max(150, int(dpi * scale_factor))  # Minimum 150 DPI
+            logger.info(f"Adjusted DPI from {dpi} to {adjusted_dpi} for page {page_num + 1}")
+            dpi = adjusted_dpi
+
+        # Render page to image (now safely)
         pix = page.get_pixmap(dpi=dpi)
 
         # Convert to numpy array

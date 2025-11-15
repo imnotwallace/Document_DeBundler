@@ -21,9 +21,17 @@ export interface OCRQueueItem {
   filePath: string;
   pages: number;
   size: number;
-  status: 'pending' | 'processing' | 'complete' | 'failed';
+  status: 'queued' | 'processing' | 'complete' | 'failed';
   progress?: number;
   error?: string;
+
+  // Timing fields
+  queuedAt?: number;        // Unix timestamp (ms)
+  startedAt?: number;       // Unix timestamp (ms)
+  completedAt?: number;     // Unix timestamp (ms)
+  elapsedTime?: number;     // Seconds
+  currentPage?: number;
+  totalPages?: number;
 }
 
 // Sort configuration for OCR queue

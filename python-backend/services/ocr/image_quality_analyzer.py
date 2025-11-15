@@ -107,9 +107,9 @@ class ImageQualityAnalyzer:
 
     def __init__(
         self,
-        blur_threshold: float = 100.0,
-        contrast_threshold: float = 40.0,
-        noise_threshold: float = 50.0
+        blur_threshold: float = 100.0,  # Lower = more sensitive
+        contrast_threshold: float = 40.0,  # Lower = more sensitive
+        noise_threshold: float = 50.0  # Higher = more sensitive
     ):
         """
         Initialize quality analyzer with thresholds.
@@ -148,9 +148,21 @@ class ImageQualityAnalyzer:
 
         # Convert to grayscale if needed
         if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        else:
+            if image.shape[2] == 1:
+                # Grayscale with channel dimension - squeeze it
+                gray = image.squeeze()
+            elif image.shape[2] in (3, 4):
+                # RGB or RGBA - convert to grayscale
+                gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            else:
+                logger.warning(f"Unexpected number of channels: {image.shape[2]}, returning default metrics")
+                return self._default_metrics()
+        elif len(image.shape) == 2:
+            # Already grayscale
             gray = image.copy()
+        else:
+            logger.warning(f"Unexpected image shape: {image.shape}, returning default metrics")
+            return self._default_metrics()
 
         logger.debug(f"Analyzing image quality: shape={gray.shape}, dtype={gray.dtype}")
 
@@ -486,9 +498,9 @@ class ImageQualityAnalyzer:
 
 def analyze_image_quality(
     image: np.ndarray,
-    blur_threshold: float = 100.0,
-    contrast_threshold: float = 40.0,
-    noise_threshold: float = 50.0
+    blur_threshold: float = 150.0,
+    contrast_threshold: float = 50.0,
+    noise_threshold: float = 40.0
 ) -> ImageQualityMetrics:
     """
     Convenience function to analyze image quality.
