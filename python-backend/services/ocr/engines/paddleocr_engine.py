@@ -8,10 +8,12 @@ High-performance OCR with GPU support
 from ..cuda_path_fix import add_cuda_dlls_to_path
 add_cuda_dlls_to_path()
 
-# IMPORTANT: Apply max_side_limit patch BEFORE PaddleOCR imports
-# This overrides the default 4000px limit to support high-DPI scans
-from ..max_side_limit_patch import apply_max_side_limit_patch
-apply_max_side_limit_patch()  # Auto-detects GPU/CPU memory and sets appropriate limit
+# NOTE: max_side_limit patch DISABLED - keeping default 4000px limit
+# Testing showed that bypassing the 4000px limit causes OOM crashes on 4GB GPUs:
+# - 600 DPI (36.9MP) requires 8.77GB VRAM (have 4GB) -> CRASH
+# - 1200 DPI (147.6MP) requires 4.41GB VRAM (have 4GB) -> CRASH
+# The 4000px limit is a safety mechanism, not a bug.
+# Improvement to 90%+ will come from post-processing instead of higher resolution.
 
 import logging
 import time

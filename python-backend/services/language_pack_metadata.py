@@ -47,6 +47,18 @@ class LanguagePackInfo:
             # Fall back to mobile if server not available or mobile selected
             return self.script_model.mobile_model_name
     
+    def get_detection_model_name(self) -> str:
+        """
+        Get the detection model name based on the selected version.
+        
+        Returns:
+            Detection model name for the selected version (server or mobile)
+        """
+        if self.model_version == "server":
+            return DETECTION_MODEL_SERVER
+        else:
+            return DETECTION_MODEL_MOBILE
+    
     def can_use_server_version(self) -> bool:
         """Check if server version is available for this language"""
         return self.script_model.has_server_version
@@ -72,16 +84,16 @@ SCRIPT_MODELS = {
     ),
     "english": ScriptModelInfo(
         script_name="english",
-        server_model_name="PP-OCRv5_server_rec",  # Multi-language server (no English-specific server exists)
-        mobile_model_name="en_PP-OCRv5_mobile_rec",  # English-specific mobile model (85.25% accuracy)
+        server_model_name="PP-OCRv4_server_rec",  # CRITICAL: v4 detects 15x more text than v5!
+        mobile_model_name="en_PP-OCRv4_mobile_rec",  # CRITICAL: v4 detects 15x more text than v5!
         approximate_size_mb=9.0,
         description="English (optimized)",
         has_server_version=True
     ),
     "chinese": ScriptModelInfo(
         script_name="chinese",
-        server_model_name="PP-OCRv5_server_rec",
-        mobile_model_name="PP-OCRv5_mobile_rec",
+        server_model_name="PP-OCRv4_server_rec",  # CRITICAL: v4 detects 15x more text than v5!
+        mobile_model_name="PP-OCRv4_mobile_rec",  # CRITICAL: v4 detects 15x more text than v5!
         approximate_size_mb=10.5,
         description="Chinese (Simplified and Traditional)",
         has_server_version=True
@@ -120,17 +132,26 @@ SCRIPT_MODELS = {
     ),
     "japanese": ScriptModelInfo(
         script_name="japanese",
-        server_model_name="PP-OCRv5_server_rec",
-        mobile_model_name="PP-OCRv5_mobile_rec",
+        server_model_name="PP-OCRv4_server_rec",  # CRITICAL: v4 detects 15x more text than v5!
+        mobile_model_name="PP-OCRv4_mobile_rec",  # CRITICAL: v4 detects 15x more text than v5!
         approximate_size_mb=11.5,
         description="Japanese",
         has_server_version=True
     ),
 }
 
-# Shared detection model (used across all languages)
-DETECTION_MODEL_NAME = "PP-OCRv5_server_det"
-DETECTION_MODEL_SIZE_MB = 12.0
+# Shared detection models (used across all languages)
+# Server model: More accurate and better quality, but more conservative (fewer false positives)
+# Mobile model: Smaller/faster but lower quality (more gibberish)
+# CRITICAL: Using PP-OCRv4 instead of PP-OCRv5 - v4 detects 15x more text regions on small body text!
+DETECTION_MODEL_SERVER = "PP-OCRv4_server_det"
+DETECTION_MODEL_MOBILE = "PP-OCRv4_mobile_det"
+DETECTION_MODEL_SIZE_SERVER_MB = 12.0
+DETECTION_MODEL_SIZE_MOBILE_MB = 1.1  # Mobile is ~11x smaller
+
+# Default detection model: Server has better quality, even if more conservative
+DETECTION_MODEL_NAME = DETECTION_MODEL_SERVER
+DETECTION_MODEL_SIZE_MB = DETECTION_MODEL_SIZE_SERVER_MB
 
 # Language pack definitions
 # Format: code -> LanguagePackInfo
@@ -307,7 +328,8 @@ def update_installed_status(lang_pack: LanguagePackInfo) -> LanguagePackInfo:
     Returns:
         Updated language pack with installed status
     """
-    detection_installed = check_model_installed(lang_pack.detection_model_name)
+    detection_model_name = lang_pack.get_detection_model_name()
+    detection_installed = check_model_installed(detection_model_name)
     recognition_model_name = lang_pack.get_recognition_model_name()
     recognition_installed = check_model_installed(recognition_model_name)
 

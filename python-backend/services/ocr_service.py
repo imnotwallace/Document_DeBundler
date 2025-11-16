@@ -11,6 +11,7 @@ from PIL import Image
 
 from .ocr import OCRManager, OCRConfig, create_ocr_manager, get_default_config, get_model_directory
 from .ocr.engine_pool import OCREnginePool, get_engine_pool
+from .ocr.post_processor import process_ocr_text
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +318,10 @@ class OCRService:
                 return ""
 
             logger.debug(f"OCR confidence: {result.confidence:.2f}, time: {result.processing_time:.2f}s")
-            return result.text
+
+            # Apply post-processing to improve accuracy
+            processed_text = process_ocr_text(result.text)
+            return processed_text
 
         except Exception as e:
             logger.error(f"Failed to extract text: {e}", exc_info=True)

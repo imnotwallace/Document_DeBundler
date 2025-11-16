@@ -718,9 +718,10 @@ def get_quality_preset(
     # Preset-specific settings
     if preset == QualityPreset.FAST:
         # Fast: 300 DPI, minimal processing
+        # Phase 3 finding: use_space_char doesn't exist in PaddleOCR 3.3.1
         target_dpi = 300
         engine_settings = {
-            'use_space_char': True,
+            # No custom parameters for FAST preset - use PaddleOCR defaults
         }
         batch_size = get_optimal_batch_size(
             use_gpu,
@@ -745,13 +746,15 @@ def get_quality_preset(
         )
     
     elif preset == QualityPreset.HIGH:
-        # High: 600 DPI, balanced tuning (Phase 2 optimized)
+        # High: 600 DPI, VERY AGGRESSIVE detection (Phase 3 tuning)
+        # Goal: Detect ALL text regions, even faint/low-contrast text
         target_dpi = 600
         engine_settings = {
-            'text_det_box_thresh': 0.28,     # Lowered to detect more text regions
-            'text_det_unclip_ratio': 2.2,    # Maximum expansion
-            'text_rec_score_thresh': 0.5,    # Raised to filter low-confidence garbage
-            'text_det_thresh': 0.2,          # Lower detection threshold
+            # VERY AGGRESSIVE detection parameters to catch all text
+            'text_det_box_thresh': 0.2,      # Very low - detect more boxes (was 0.35)
+            'text_det_unclip_ratio': 2.8,    # Very high - expand boxes more (was 1.9)
+            'text_rec_score_thresh': 0.4,    # Lower - accept more recognition results (was 0.5)
+            'text_det_thresh': 0.15,         # Very low - detect faint text (was 0.2)
         }
         batch_size = get_optimal_batch_size(
             use_gpu,
@@ -762,12 +765,14 @@ def get_quality_preset(
     
     elif preset == QualityPreset.MAXIMUM:
         # Maximum: 1200 DPI, balanced tuning (Phase 2 optimized)
+        # Phase 3 finding: Spacing parameters don't exist in PaddleOCR 3.3.1
         target_dpi = 1200
         engine_settings = {
-            'text_det_box_thresh': 0.28,     # Lowered to detect more text regions
-            'text_det_unclip_ratio': 2.2,    # Maximum expansion
-            'text_rec_score_thresh': 0.5,    # Raised to filter low-confidence garbage
-            'text_det_thresh': 0.2,          # Lower detection threshold
+            # Core detection parameters (Phase 2 optimized - VALID params only)
+            'text_det_box_thresh': 0.35,     # Balanced detection (reduced from 0.28)
+            'text_det_unclip_ratio': 1.9,    # Moderate expansion (reduced from 2.2)
+            'text_rec_score_thresh': 0.5,    # Filter low-confidence garbage
+            'text_det_thresh': 0.2,          # Lower pixel detection threshold
         }
         batch_size = get_optimal_batch_size(
             use_gpu,
