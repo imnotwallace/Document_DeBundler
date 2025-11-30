@@ -625,16 +625,66 @@ class RegionFirstFusion(ReadingOrderFusion):
             RegionType.REFERENCE, RegionType.ALGORITHM,
         )]
 
+        # Separate into regions where word is properly inside Y range vs boundary cases
+        # A word is "properly inside" if it's well within the Y range, not just at the edge
+        properly_inside_regions = []
+        boundary_regions = []
+
+        for region in text_regions:
+            y_tolerance = 50  # Allow some slack for book curvature
+
+            # Calculate how deeply the word is inside the region's Y range
+            # Positive = inside, negative = outside
+            y_margin_top = word_cy - region.bbox.y0
+            y_margin_bottom = region.bbox.y1 - word_cy
+
+            if y_margin_top >= 0 and y_margin_bottom >= 0:
+                # Word is properly inside the Y range
+                properly_inside_regions.append((region, min(y_margin_top, y_margin_bottom)))
+            elif y_margin_top >= -y_tolerance and y_margin_bottom >= -y_tolerance:
+                # Word is at the boundary (within tolerance)
+                boundary_regions.append(region)
+
+        # First, try to find best properly-inside region
+        # Prefer regions where word is more deeply inside (larger margin)
+        # and horizontally closest
+        best_region = None
+        best_score = float('-inf')
+
+        for region, y_margin in properly_inside_regions:
+            dx = max(region.bbox.x0 - word_cx, 0, word_cx - region.bbox.x1)
+            if dx < 500:
+                # Score = y_margin - dx (prefer deeper inside Y and smaller X distance)
+                # Weight Y margin more heavily to prioritize proper containment
+                score = y_margin * 2 - dx
+                if score > best_score:
+                    best_score = score
+                    best_region = region
+
+        if best_region:
+            return best_region
+
+        # Fall back to boundary regions, preferring closest
         min_distance = float('inf')
         nearest_region = None
 
+        for region in boundary_regions:
+            dx = max(region.bbox.x0 - word_cx, 0, word_cx - region.bbox.x1)
+            if dx < min_distance and dx < 500:
+                min_distance = dx
+                nearest_region = region
+
+        if nearest_region:
+            return nearest_region
+
+        # Fall back to finding nearest region by full Euclidean distance
+        min_distance = float('inf')
+
         for region in text_regions:
-            # Calculate distance from word center to region bbox edge
             dx = max(region.bbox.x0 - word_cx, 0, word_cx - region.bbox.x1)
             dy = max(region.bbox.y0 - word_cy, 0, word_cy - region.bbox.y1)
             distance = (dx * dx + dy * dy) ** 0.5
 
-            # Only consider regions within reasonable proximity (500px)
             if distance < min_distance and distance < 500:
                 min_distance = distance
                 nearest_region = region
@@ -661,86 +711,126 @@ class RegionFirstFusion(ReadingOrderFusion):
         return intersection / word_area if word_area > 0 else 0.0
 
     def _form_lines_in_region(self, words: List[WordBox], page_height: float = 0) -> List[Line]:
-        """Form lines from words using horizontal sweep (perspective-aware).
+        """Form lines using graph-based grouping with adaptive Y tolerance.
 
-        Instead of sorting by Y and grouping vertically-close words, we:
-        1. Sort by X (left to right) as primary
-        2. For each word, find/create a line where it fits horizontally
-        3. Allow Y-tolerance based on horizontal proximity
+        This algorithm handles book spine curvature by using LOCAL comparisons
+        between horizontally adjacent words, rather than global curvature estimation.
 
-        This handles perspective distortion where same-line words have
-        different Y coordinates due to camera angle.
+        Algorithm:
+        1. Build adjacency graph: words are connected if horizontally close with similar Y
+        2. Y tolerance scales with horizontal distance (handles curvature naturally)
+        3. Find connected components - each component is a line
+        4. Sort lines by average Y for reading order
         """
         if not words:
             return []
 
-        # Sort words by x position (left to right), then by y
-        sorted_words = sorted(words, key=lambda w: (w.x0, w.y0))
+        if len(words) < 2:
+            line = Line(words=list(words), line_id=0)
+            return [line]
 
-        lines: List[List[WordBox]] = []
+        # Calculate statistics
+        avg_height = sum(w.height for w in words) / len(words)
+        page_width = max(w.x1 for w in words) - min(w.x0 for w in words)
 
-        for word in sorted_words:
-            best_line_idx = -1
-            best_score = float('inf')
+        # Parameters for line detection
+        # Max horizontal gap between words on same line (typical word spacing)
+        max_horizontal_gap = avg_height * 3.0
 
-            # Try to find a line this word belongs to
-            for idx, line_words in enumerate(lines):
-                # Get the rightmost word in this line
-                rightmost = max(line_words, key=lambda w: w.x1)
+        # Base Y tolerance for adjacent words
+        base_y_tolerance = avg_height * 0.6
 
-                # Check horizontal proximity (word should be to the right or overlapping)
-                horizontal_gap = word.x0 - rightmost.x1
-                avg_height = sum(w.height for w in line_words) / len(line_words)
+        # Additional Y tolerance per unit of horizontal distance (curvature compensation)
+        # ~0.02 means 20 pixels of Y variation per 1000 pixels of X distance
+        curvature_tolerance_rate = 0.025
 
-                # Word must be reasonably close horizontally (max 3x height gap)
-                if horizontal_gap > avg_height * 3:
-                    continue  # Too far right
+        # Union-Find data structure for grouping words
+        parent = list(range(len(words)))
 
-                # Word can't be too far left (would indicate line wrap)
-                if horizontal_gap < -avg_height * 2:
-                    continue  # Overlapping too much, probably different line
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
 
-                # Calculate Y alignment with the rightmost word
-                y_diff = abs(word.center_y - rightmost.center_y)
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
 
-                # Y-tolerance scales with horizontal gap, but capped
-                # Close words: more Y tolerance (for perspective)
-                # Gap words: stricter Y tolerance
-                if horizontal_gap < 0:  # Overlapping
-                    y_tolerance = avg_height * 0.6
-                elif horizontal_gap < avg_height:  # Close
-                    y_tolerance = avg_height * 0.8
-                else:  # Moderate gap
-                    y_tolerance = avg_height * 0.5
+        # Sort words by X for efficient neighbor finding
+        indexed_words = [(i, w) for i, w in enumerate(words)]
+        indexed_words.sort(key=lambda iw: iw[1].x0)
 
-                if y_diff < y_tolerance:
-                    # Score based on both Y-diff and horizontal alignment
-                    score = y_diff + horizontal_gap * 0.1
-                    if score < best_score:
-                        best_score = score
-                        best_line_idx = idx
+        # Build adjacency graph: connect words that belong on the same line
+        for idx in range(len(indexed_words)):
+            i, word_i = indexed_words[idx]
 
-            if best_line_idx >= 0:
-                lines[best_line_idx].append(word)
-            else:
-                # Start a new line
-                lines.append([word])
+            # Look at subsequent words (already sorted by X)
+            for jdx in range(idx + 1, len(indexed_words)):
+                j, word_j = indexed_words[jdx]
 
-        # Convert to Line objects, sorting words within each line by x
-        result = []
-        for idx, line_words in enumerate(lines):
-            line_words_sorted = sorted(line_words, key=lambda w: w.x0)
-            line = Line(words=line_words_sorted, line_id=idx)
-            result.append(line)
+                # Horizontal gap between words
+                h_gap = word_j.x0 - word_i.x1
 
-        # Sort lines by average Y position (top to bottom reading order)
-        result.sort(key=lambda line: sum(w.center_y for w in line.words) / len(line.words))
+                # If horizontal gap is too large, no need to check further
+                # (words are sorted by X, so all subsequent will have larger gaps)
+                if h_gap > max_horizontal_gap:
+                    break
 
-        # Renumber line IDs after sorting
-        for idx, line in enumerate(result):
+                # For overlapping or close words, check Y alignment
+                # Y tolerance increases with horizontal distance to handle curvature
+                x_distance = abs(word_j.center_x - word_i.center_x)
+                y_tolerance = base_y_tolerance + curvature_tolerance_rate * x_distance
+
+                y_diff = abs(word_j.center_y - word_i.center_y)
+
+                if y_diff <= y_tolerance:
+                    union(i, j)
+
+        # Also connect words that overlap horizontally (covers cases where
+        # words are not strictly left-to-right but still on same line)
+        for idx in range(len(indexed_words)):
+            i, word_i = indexed_words[idx]
+
+            for jdx in range(idx + 1, len(indexed_words)):
+                j, word_j = indexed_words[jdx]
+
+                # Check if words overlap horizontally
+                overlap_x = min(word_i.x1, word_j.x1) - max(word_i.x0, word_j.x0)
+                if overlap_x > 0:
+                    # Words overlap horizontally - check Y with tight tolerance
+                    y_diff = abs(word_j.center_y - word_i.center_y)
+                    if y_diff <= base_y_tolerance:
+                        union(i, j)
+
+                # Stop if word_j is completely past word_i
+                if word_j.x0 > word_i.x1 + max_horizontal_gap:
+                    break
+
+        # Group words by their root parent (connected component)
+        groups = {}
+        for i, word in enumerate(words):
+            root = find(i)
+            if root not in groups:
+                groups[root] = []
+            groups[root].append(word)
+
+        # Convert groups to lines
+        lines = []
+        for group_words in groups.values():
+            # Sort words in each line by X
+            sorted_line_words = sorted(group_words, key=lambda w: w.x0)
+            line = Line(words=sorted_line_words, line_id=len(lines))
+            lines.append(line)
+
+        # Sort lines by average Y (top to bottom reading order)
+        lines.sort(key=lambda ln: sum(w.center_y for w in ln.words) / len(ln.words))
+
+        # Renumber line IDs
+        for idx, line in enumerate(lines):
             line.line_id = idx
 
-        return result
+        return lines
 
 
 
