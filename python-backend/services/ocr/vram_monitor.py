@@ -256,3 +256,52 @@ class VRAMMonitor:
             )
         else:
             logger.debug("VRAM monitoring not available (CPU mode)")
+
+    def wait_for_memory_free(self, min_free_mb: int, timeout_sec: float = 30.0, poll_interval: float = 0.5) -> bool:
+        """
+        Wait until at least min_free_mb of VRAM is free.
+        
+        Args:
+            min_free_mb: Minimum free VRAM in MB required
+            timeout_sec: Maximum time to wait in seconds
+            poll_interval: Time between checks in seconds
+            
+        Returns:
+            True if memory became available, False if timeout reached
+        """
+        import time
+        
+        if not self.is_available():
+            logger.debug("VRAM monitoring not available (CPU mode), assuming memory is free")
+            return True
+            
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout_sec:
+            info = self.get_info()
+            free_mb = (info["total_gb"] - info["used_gb"]) * 1024
+            
+            if free_mb >= min_free_mb:
+                logger.debug(f"VRAM available: {free_mb:.0f}MB free (required: {min_free_mb}MB)")
+                return True
+                
+            # Try to free memory
+            try:
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except Exception as e:
+                logger.debug(f"Memory cleanup attempt failed: {e}")
+                
+            time.sleep(poll_interval)
+            
+        # Timeout reached
+        info = self.get_info()
+        free_mb = (info["total_gb"] - info["used_gb"]) * 1024
+        logger.warning(
+            f"VRAM wait timeout: only {free_mb:.0f}MB free after {timeout_sec}s "
+            f"(required: {min_free_mb}MB)"
+        )
+        return False

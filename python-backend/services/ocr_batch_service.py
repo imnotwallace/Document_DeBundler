@@ -34,6 +34,10 @@ from .ocr.base import OCRResult
 from .ocr.intelligent_preprocessing import IntelligentPreprocessor
 from .memory_monitor import MemoryMonitor
 
+# Multi-pass pipeline with Florence-2 layout analysis
+from .ocr.multipass.pipeline_orchestrator import MultiPassPipelineOrchestrator
+from .ocr.multipass.pass_config import MultiPassConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,7 +96,13 @@ class OCRProcessingConfig:
     preprocessing_enable_validation: bool = True  # Validate quality improvements
     preprocessing_min_quality_improvement: float = 4.0  # Minimum improvement to use preprocessed (tuned for photo documents)
     preprocessing_min_ssim: float = 0.85  # Minimum structural similarity threshold
-    
+
+    # Multi-pass pipeline with Florence-2 layout analysis (NEW)
+    enable_multipass: bool = True  # Enable Florence-2 + PaddleOCR multi-pass pipeline
+    florence_batch_size: int = 1  # Batch size for Florence-2 (start conservative)
+    checkpoint_recovery: bool = True  # Enable checkpoint-based recovery
+    multipass_workers: int = 4  # Number of parallel workers for CPU passes
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary"""
         return {
@@ -108,6 +118,10 @@ class OCRProcessingConfig:
             'preprocessing_enable_validation': self.preprocessing_enable_validation,
             'preprocessing_min_quality_improvement': self.preprocessing_min_quality_improvement,
             'preprocessing_min_ssim': self.preprocessing_min_ssim,
+            'enable_multipass': self.enable_multipass,
+            'florence_batch_size': self.florence_batch_size,
+            'checkpoint_recovery': self.checkpoint_recovery,
+            'multipass_workers': self.multipass_workers,
         }
 
 
@@ -1913,6 +1927,18 @@ class OCRBatchService:
             Dictionary with processing results
         """
         file_name = Path(file_path).name
+
+        # Check if multipass mode is enabled
+        if self.config.enable_multipass:
+            return self._process_single_file_multipass(
+                file_path=file_path,
+                output_dir=output_dir,
+                file_idx=file_idx,
+                total_files=total_files
+            )
+
+        # Legacy single-pass processing continues below
+        file_name = Path(file_path).name
         logger.info(f"Processing file {file_idx}/{total_files}: {file_name}")
 
         # Emit "processing" status
@@ -2322,6 +2348,186 @@ class OCRBatchService:
                 except ImportError:
                     pass
 
+        return result
+
+    def _process_single_file_multipass(
+        self,
+        file_path: str,
+        output_dir: str,
+        file_idx: int,
+        total_files: int
+    ) -> Dict[str, Any]:
+        """
+        Process a single PDF file using the Florence-2 + PaddleOCR multi-pass pipeline.
+        
+        This method implements the 6-pass architecture:
+        - Pass 0: Initialization and VRAM check
+        - Pass 1: PaddleOCR text extraction (GPU)
+        - Pass 2: Florence-2 layout analysis (GPU, FP16)
+        - Pass 3: Reading order detection (CPU, parallel)
+        - Pass 4: PDF creation (CPU, parallel)
+        - Pass 5: PDF merging
+        
+        Only ONE GPU model is loaded at a time to guarantee 4GB VRAM operation.
+        
+        Args:
+            file_path: Path to PDF file
+            output_dir: Directory to save processed file
+            file_idx: Current file index (1-based)
+            total_files: Total number of files
+            
+        Returns:
+            Dictionary with processing results
+        """
+        file_name = Path(file_path).name
+        logger.info(f"[MULTIPASS] Processing file {file_idx}/{total_files}: {file_name}")
+        
+        # Emit "processing" status
+        started_at = time.time()
+        self.file_start_times[file_path] = started_at
+        queued_at = self.file_queue_times.get(file_path)
+        
+        if self.file_status_callback:
+            self.file_status_callback(
+                file_path=file_path,
+                file_name=file_name,
+                file_index=file_idx,
+                total_files=total_files,
+                status="processing",
+                queued_at=queued_at,
+                started_at=started_at
+            )
+        
+        result = {
+            'status': 'failed',
+            'pages_processed': 0,
+            'pages_ocr': 0,
+            'pages_text_layer': 0,
+            'error': None,
+            'output_path': None,
+            'pipeline_mode': 'multipass'
+        }
+        
+        try:
+            # Configure multipass pipeline
+            output_path = Path(output_dir) / file_name
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            multipass_config = MultiPassConfig(
+                florence_batch_size=self.config.florence_batch_size,
+                use_fp16=True,  # Always use FP16 for Florence-2
+                aggressive_cleanup=True,
+                checkpoint_recovery=self.config.checkpoint_recovery,
+                max_workers=self.config.multipass_workers,
+                vram_requirement_mb=2500,  # Florence-2 FP16 requirement
+                paddleocr_config={
+                    'use_gpu': self.use_gpu,
+                    'target_dpi': getattr(self, 'override_dpi', 300)
+                }
+            )
+            
+            # Create progress callback that integrates with batch service
+            def multipass_progress_callback(current: int, total: int, message: str, pass_name: str):
+                self._report_progress(
+                    current=current,
+                    total=total,
+                    message=f"File {file_idx}/{total_files}: {file_name} - [{pass_name}] {message}"
+                )
+            
+            # Create orchestrator with VRAM monitor
+            orchestrator = MultiPassPipelineOrchestrator(
+                vram_monitor=self.vram_monitor,
+                progress_callback=multipass_progress_callback,
+                cancellation_flag=self.cancellation_flag
+            )
+            
+            # Run multipass pipeline
+            pipeline_result = orchestrator.process_document(
+                pdf_path=Path(file_path),
+                output_path=output_path,
+                config=multipass_config
+            )
+            
+            # Map pipeline result to batch service result format
+            result['status'] = pipeline_result.get('status', 'failed')
+            result['pages_processed'] = pipeline_result.get('total_pages', 0)
+            result['pages_ocr'] = pipeline_result.get('pages_ocr', 0)
+            result['pages_text_layer'] = pipeline_result.get('pages_text_layer', 0)
+            result['output_path'] = str(output_path) if result['status'] == 'success' else None
+            result['error'] = pipeline_result.get('error')
+            
+            # Add multipass-specific stats
+            result['florence_regions_detected'] = pipeline_result.get('florence_regions_detected', 0)
+            result['reading_order_applied'] = pipeline_result.get('reading_order_applied', False)
+            result['checkpoint_used'] = pipeline_result.get('checkpoint_used', False)
+            
+            # File size tracking
+            if result['status'] == 'success' and output_path.exists():
+                original_size = Path(file_path).stat().st_size
+                final_size = output_path.stat().st_size
+                result['original_size_mb'] = round(original_size / (1024 * 1024), 2)
+                result['final_size_mb'] = round(final_size / (1024 * 1024), 2)
+                result['size_increase_ratio'] = round(final_size / original_size, 2) if original_size > 0 else 1.0
+            
+            logger.info(
+                f"[MULTIPASS] Completed {file_name}: "
+                f"{result['pages_processed']} pages, "
+                f"{result['pages_ocr']} OCR, "
+                f"{result.get('florence_regions_detected', 0)} Florence regions"
+            )
+            
+            # Emit "complete" status with timing
+            completed_at = time.time()
+            elapsed_time = completed_at - started_at
+            
+            if self.file_status_callback:
+                self.file_status_callback(
+                    file_path=file_path,
+                    file_name=file_name,
+                    file_index=file_idx,
+                    total_files=total_files,
+                    status="complete" if result['status'] == 'success' else "failed",
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    elapsed_time=elapsed_time,
+                    total_pages=result['pages_processed'],
+                    error=result.get('error')
+                )
+                
+        except Exception as e:
+            logger.error(f"[MULTIPASS] Failed to process {file_name}: {e}", exc_info=True)
+            result['error'] = str(e)
+            
+            # Emit "failed" status
+            completed_at = time.time()
+            elapsed_time = completed_at - started_at
+            
+            if self.file_status_callback:
+                self.file_status_callback(
+                    file_path=file_path,
+                    file_name=file_name,
+                    file_index=file_idx,
+                    total_files=total_files,
+                    status="failed",
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    elapsed_time=elapsed_time,
+                    error=str(e)
+                )
+        
+        finally:
+            # Cleanup memory after file
+            gc.collect()
+            if self.use_gpu:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+        
         return result
 
     def process_batch(

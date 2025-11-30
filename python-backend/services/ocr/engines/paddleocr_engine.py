@@ -286,6 +286,134 @@ class PaddleOCREngine(OCREngine):
         except:
             return False
 
+    def _sort_by_reading_order(self, texts: list, scores: list, bboxes: list, page_width: float, page_height: float) -> tuple:
+        """
+        Sort detected text by reading order using 5-layer reading order detection system.
+
+        Uses industry-standard projection histogram column detection and sophisticated
+        layout analysis to handle:
+        - Single-column documents
+        - Multi-column layouts (newspapers, legal documents)
+        - Tables (row-by-row reading)
+        - Mixed layouts (headers, footers, changing column counts)
+
+        Algorithm (5 layers):
+        1. Input Normalization: Validate and filter word boxes
+        2. Structural Grouping: Form lines and blocks
+        3. Region Detection: Detect layout, columns (projection histogram), headers/footers
+        4. Reading Order Assignment: Assign sequential order based on layout type
+        5. Text Output: Generate ordered text
+
+        Args:
+            texts: List of detected text strings
+            scores: List of confidence scores
+            bboxes: List of bounding boxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            page_width: Page width in pixels
+            page_height: Page height in pixels
+
+        Returns:
+            Tuple of (sorted_texts, sorted_scores, sorted_bboxes, formatted_text)
+            where formatted_text is the properly formatted text with correct spacing/newlines
+        """
+        if not bboxes or len(bboxes) == 0:
+            return texts, scores, bboxes, ' '.join(texts) if texts else ""
+
+        try:
+            # Import reading order pipeline
+            from ..reading_order import process_reading_order_safe
+
+            # Convert to format expected by reading order pipeline
+            ocr_results = []
+            for text, score, bbox in zip(texts, scores, bboxes):
+                ocr_results.append({
+                    'text': text,
+                    'bbox': bbox,  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] format
+                    'confidence': score,
+                    'page': 0
+                })
+
+            # Process with reading order pipeline - get both formatted text and structured data
+            formatted_text = process_reading_order_safe(
+                ocr_results,
+                page_width,
+                page_height,
+                config=None,  # Use default config
+                return_structured=False  # Get formatted text string
+            )
+
+            structured_output = process_reading_order_safe(
+                ocr_results,
+                page_width,
+                page_height,
+                config=None,
+                return_structured=True  # Get structured data for word-level details
+            )
+
+            # Extract sorted data - maintain original text/bbox granularity
+            # but in the new reading order
+            sorted_texts = []
+            sorted_scores = []
+            sorted_bboxes = []
+
+            for item in structured_output:
+                # Each item is a block with lines and words
+                # Extract words in order to maintain original PaddleOCR granularity
+                for line in item.get('lines', []):
+                    for word in line.get('words', []):
+                        sorted_texts.append(word['text'])
+                        sorted_scores.append(word.get('confidence', 1.0))
+
+                        # Convert bbox to [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] format
+                        bbox = word['bbox']
+                        if len(bbox) == 4:  # [x0, y0, x1, y1] format
+                            x0, y0, x1, y1 = bbox
+                            bbox_4point = [
+                                [x0, y0],  # top-left
+                                [x1, y0],  # top-right
+                                [x1, y1],  # bottom-right
+                                [x0, y1]   # bottom-left
+                            ]
+                            sorted_bboxes.append(bbox_4point)
+                        else:
+                            # Already in correct format
+                            sorted_bboxes.append(bbox)
+
+            logger.info(f"[Reading Order] Processed {len(texts)} words using 5-layer pipeline")
+
+            return sorted_texts, sorted_scores, sorted_bboxes, formatted_text
+
+        except Exception as e:
+            logger.error(f"Reading order pipeline failed: {e}", exc_info=True)
+            logger.warning("Falling back to simple top-to-bottom, left-to-right sorting")
+
+            # Fallback to simple lexicographic sorting
+            items = []
+            for text, score, bbox in zip(texts, scores, bboxes):
+                y_coords = [p[1] for p in bbox]
+                x_coords = [p[0] for p in bbox]
+                min_y = min(y_coords)
+                min_x = min(x_coords)
+
+                items.append({
+                    'text': text,
+                    'score': score,
+                    'bbox': bbox,
+                    'y': min_y,
+                    'x': min_x
+                })
+
+            # Simple sort by Y then X
+            sorted_items = sorted(items, key=lambda item: (item['y'], item['x']))
+
+            sorted_texts = [item['text'] for item in sorted_items]
+            sorted_scores = [item['score'] for item in sorted_items]
+            sorted_bboxes = [item['bbox'] for item in sorted_items]
+
+            # Fallback text formatting (simple join with spaces)
+            fallback_text = ' '.join(sorted_texts)
+
+            return sorted_texts, sorted_scores, sorted_bboxes, fallback_text
+
     def process_image(self, image: np.ndarray) -> OCRResult:
         """
         Process a single image with PaddleOCR.
@@ -353,8 +481,17 @@ class PaddleOCREngine(OCREngine):
                         bbox = poly.tolist() if hasattr(poly, 'tolist') else poly
                         bboxes.append(bbox)
 
-            # Combine text
-            full_text = '\n'.join(text_lines)
+            # Sort text by reading order using 5-layer pipeline
+            if text_lines and bboxes:
+                # Get page dimensions from image shape
+                page_height, page_width = image.shape[:2]
+
+                text_lines, confidences, bboxes, full_text = self._sort_by_reading_order(
+                    text_lines, confidences, bboxes, page_width, page_height
+                )
+            else:
+                # No text detected
+                full_text = ""
 
             # Calculate average confidence
             avg_confidence = (
