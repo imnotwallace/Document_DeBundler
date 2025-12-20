@@ -152,6 +152,12 @@ def _process_page(engine, image_path: Path, page_num: int) -> OCRPageResult:
 
                     # Convert polygon to bbox
                     if len(poly) == 4:
+                        # Convert numpy arrays to lists if needed
+                        if hasattr(poly, 'tolist'):
+                            poly = poly.tolist()
+                        else:
+                            poly = [[float(p[0]), float(p[1])] for p in poly]
+
                         x_coords = [p[0] for p in poly]
                         y_coords = [p[1] for p in poly]
                         bbox = {
@@ -160,12 +166,21 @@ def _process_page(engine, image_path: Path, page_num: int) -> OCRPageResult:
                             "x1": int(max(x_coords)),
                             "y1": int(max(y_coords)),
                         }
+
+                        # CRITICAL: Calculate center_y from original polygon midpoints
+                        # For curved text, the left edge mid-y and right edge mid-y differ.
+                        # Average them to get the true center Y position on the curve.
+                        left_mid_y = (poly[0][1] + poly[3][1]) / 2  # Top-left + Bottom-left
+                        right_mid_y = (poly[1][1] + poly[2][1]) / 2  # Top-right + Bottom-right
+                        center_y = (left_mid_y + right_mid_y) / 2
                     else:
                         continue
 
                     word_boxes.append({
                         "text": text,
                         "bbox": bbox,
+                        "original_poly": poly,  # Store original for Pass 3
+                        "center_y": center_y,   # Pre-calculated accurate center Y
                         "confidence": float(score),
                     })
 

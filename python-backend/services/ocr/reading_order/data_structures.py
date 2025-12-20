@@ -36,6 +36,7 @@ class WordBox:
     block_id: Optional[int] = None
     region_id: Optional[int] = None
     reading_order: Optional[int] = None
+    original_index: Optional[int] = None  # For tracking original position during reordering
 
     def __post_init__(self):
         """Calculate derived properties after initialization."""
@@ -46,7 +47,8 @@ class WordBox:
         self.baseline = self.y1  # Simplified baseline approximation
 
     @classmethod
-    def from_ocr_result(cls, text: str, bbox: list, page: int = 0, confidence: float = 1.0):
+    def from_ocr_result(cls, text: str, bbox: list, page: int = 0, confidence: float = 1.0,
+                        center_y_override: float = None):
         """
         Create WordBox from OCR bounding box.
 
@@ -56,15 +58,20 @@ class WordBox:
                   or [x0, y0, x1, y1]
             page: Page number
             confidence: OCR confidence score
+            center_y_override: Optional pre-calculated center_y (for curved text accuracy)
 
         Returns:
             WordBox instance
         """
+        calculated_center_y = None
+
         if len(bbox) == 4 and isinstance(bbox[0], (int, float)):
             # Format: [x0, y0, x1, y1]
             x0, y0, x1, y1 = bbox
         else:
             # Format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            # For curved text, calculate center_y from polygon midpoints
+            # This is more accurate than using min/max bounding box center
             x_coords = [p[0] for p in bbox]
             y_coords = [p[1] for p in bbox]
             x0 = min(x_coords)
@@ -72,7 +79,16 @@ class WordBox:
             x1 = max(x_coords)
             y1 = max(y_coords)
 
-        return cls(
+            # Calculate true center_y from polygon edge midpoints
+            # bbox format: [top-left, top-right, bottom-right, bottom-left]
+            # Left edge mid-y = (top-left.y + bottom-left.y) / 2
+            # Right edge mid-y = (top-right.y + bottom-right.y) / 2
+            if len(bbox) == 4:
+                left_mid_y = (bbox[0][1] + bbox[3][1]) / 2
+                right_mid_y = (bbox[1][1] + bbox[2][1]) / 2
+                calculated_center_y = (left_mid_y + right_mid_y) / 2
+
+        word_box = cls(
             text=text,
             x0=x0,
             y0=y0,
@@ -81,6 +97,14 @@ class WordBox:
             page=page,
             confidence=confidence
         )
+
+        # Override center_y if provided or calculated from polygon
+        if center_y_override is not None:
+            word_box.center_y = center_y_override
+        elif calculated_center_y is not None:
+            word_box.center_y = calculated_center_y
+
+        return word_box
 
 
 @dataclass

@@ -25,6 +25,7 @@ import numpy as np
 from ..base import OCREngine, OCRResult, OCRConfig
 from ..vram_monitor import VRAMMonitor
 from ..config import detect_model_type
+from ..reading_order.config import ReadingOrderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +287,61 @@ class PaddleOCREngine(OCREngine):
         except:
             return False
 
+    def _detect_layout_type(self, bboxes: list, page_width: float) -> str:
+        """
+        Detect whether the page has a multi-column or single-column layout.
+        
+        Uses a simple heuristic: if significant text exists in both the left third
+        and right third of the page (with a gap in the middle), it's multi-column.
+        
+        Args:
+            bboxes: List of bounding boxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            page_width: Page width in pixels
+            
+        Returns:
+            "multi_column" or "single_column"
+        """
+        if not bboxes or len(bboxes) < 5:  # Need enough text to detect layout
+            return "single_column"
+            
+        # Divide page into thirds
+        left_third = page_width / 3
+        right_third = 2 * page_width / 3
+        
+        # Count words in each third
+        left_count = 0
+        middle_count = 0
+        right_count = 0
+        
+        for bbox in bboxes:
+            # Get center x of bbox
+            x_coords = [p[0] for p in bbox]
+            center_x = (min(x_coords) + max(x_coords)) / 2
+            
+            if center_x < left_third:
+                left_count += 1
+            elif center_x > right_third:
+                right_count += 1
+            else:
+                middle_count += 1
+        
+        total = left_count + middle_count + right_count
+        if total == 0:
+            return "single_column"
+            
+        # Multi-column if >20% in left AND >20% in right thirds
+        left_ratio = left_count / total
+        right_ratio = right_count / total
+        
+        if left_ratio > 0.20 and right_ratio > 0.20:
+            logger.info(f"[Layout Detection] Multi-column detected: "
+                       f"left={left_ratio:.1%}, middle={middle_count/total:.1%}, right={right_ratio:.1%}")
+            return "multi_column"
+        else:
+            logger.info(f"[Layout Detection] Single-column detected: "
+                       f"left={left_ratio:.1%}, middle={middle_count/total:.1%}, right={right_ratio:.1%}")
+            return "single_column"
+
     def _sort_by_reading_order(self, texts: list, scores: list, bboxes: list, page_width: float, page_height: float) -> tuple:
         """
         Sort detected text by reading order using 5-layer reading order detection system.
@@ -332,12 +388,21 @@ class PaddleOCREngine(OCREngine):
                     'page': 0
                 })
 
+            # Detect layout type and select appropriate config
+            layout_type = self._detect_layout_type(bboxes, page_width)
+            if layout_type == "multi_column":
+                reading_config = ReadingOrderConfig.for_multi_column()
+                logger.info("[Reading Order] Using multi-column config preset")
+            else:
+                reading_config = ReadingOrderConfig()  # Default for single-column
+                logger.info("[Reading Order] Using default single-column config")
+
             # Process with reading order pipeline - get both formatted text and structured data
             formatted_text = process_reading_order_safe(
                 ocr_results,
                 page_width,
                 page_height,
-                config=None,  # Use default config
+                config=reading_config,
                 return_structured=False  # Get formatted text string
             )
 
@@ -345,7 +410,7 @@ class PaddleOCREngine(OCREngine):
                 ocr_results,
                 page_width,
                 page_height,
-                config=None,
+                config=reading_config,
                 return_structured=True  # Get structured data for word-level details
             )
 
@@ -467,11 +532,18 @@ class PaddleOCREngine(OCREngine):
                 )
             
             if result and len(result) > 0:
-                # Paddle 3.x returns list with dict containing 'rec_texts', 'rec_scores', 'rec_polys'
+                # Paddle 3.x returns list with OCRResult object or dict
                 ocr_data = result[0]
-                texts = ocr_data.get('rec_texts', [])
-                scores = ocr_data.get('rec_scores', [])
-                polys = ocr_data.get('rec_polys', [])
+                # Handle both dict and OCRResult object (PaddleX OCR output)
+                if isinstance(ocr_data, dict):
+                    texts = ocr_data.get('rec_texts', [])
+                    scores = ocr_data.get('rec_scores', [])
+                    polys = ocr_data.get('rec_polys', [])
+                else:
+                    # OCRResult object - access as attributes
+                    texts = ocr_data.rec_texts if hasattr(ocr_data, 'rec_texts') else []
+                    scores = ocr_data.rec_scores if hasattr(ocr_data, 'rec_scores') else []
+                    polys = ocr_data.rec_polys if hasattr(ocr_data, 'rec_polys') else []
                 
                 for text, score, poly in zip(texts, scores, polys):
                     if text and text.strip():  # Only add non-empty text

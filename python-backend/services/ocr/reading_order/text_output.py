@@ -165,7 +165,8 @@ def generate_ordered_text_with_coordinates(regions: List[Region],
                 word_data = {
                     "text": word.text,
                     "bbox": [word.x0, word.y0, word.x1, word.y1],
-                    "confidence": word.confidence
+                    "confidence": word.confidence,
+                    "_original_index": word.original_index  # Preserve original index for coordinate mapping
                 }
                 line_data["words"].append(word_data)
 

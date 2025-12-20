@@ -149,6 +149,9 @@ class OCRPostProcessor:
         Segment merged words using dictionary-based word segmentation
 
         This fixes OCR issues where words are merged without spaces:
+        "isthe" -> "is the"
+        "essenceof" -> "essence of"
+        "ofinnovation" -> "of innovation"
         "ThismanualisaplicabltohndmadeTurkistablelamps"
         -> "This manual is applicable to handmade Turkish table lamps"
 
@@ -159,25 +162,48 @@ class OCRPostProcessor:
         segmented_words = []
         segmentations_applied = 0
 
+        # Common small words that often get merged with adjacent words
+        # These can appear as prefixes ("isthe") or suffixes ("essenceof")
+        common_small_words = ['is', 'of', 'and', 'to', 'in', 'the', 'it', 'a', 'us', 'or']
+
         for word in words:
-            # Only segment long words (likely merged) that are all lowercase or have unusual casing
-            # Skip short words, proper words with normal casing
-            if len(word) < 15:  # Short enough to probably be a single word
+            # Skip very short words (unlikely to be merged)
+            # Minimum of 5 chars allows "isthe" (5) to be processed
+            if len(word) < 5:
                 segmented_words.append(word)
                 continue
 
-            # Check if word contains mixed case (sign of merged words like "handmadeTurkish")
+            # Check if word contains internal capitals (sign of merged words like "handmadeTurkish")
             has_internal_caps = bool(re.search(r'[a-z][A-Z]', word))
-            is_all_lower = word.islower()
-            is_suspicious = has_internal_caps or (is_all_lower and len(word) > 20)
 
-            if is_suspicious:
-                # Segment the word
+            # Check for known merge patterns at START of word
+            # e.g., "isthe" starts with "is" and has more than 2 chars after
+            word_lower = word.lower()
+            starts_with_common = any(
+                word_lower.startswith(prefix) and len(word_lower) > len(prefix) + 2
+                for prefix in common_small_words
+            )
+
+            # Check for known merge patterns at END of word
+            # e.g., "essenceof" ends with "of" and has more than 3 chars before
+            ends_with_common = any(
+                word_lower.endswith(suffix) and len(word_lower) > len(suffix) + 3
+                for suffix in common_small_words
+            )
+
+            # Check for long lowercase runs (likely merged words)
+            is_long_lowercase = word.islower() and len(word) > 10
+
+            # Determine if we should try to segment this word
+            should_segment = has_internal_caps or starts_with_common or ends_with_common or is_long_lowercase
+
+            if should_segment:
+                # Segment the word using wordsegment library
                 segments = wordsegment.segment(word)
-                segmented_text = ' '.join(segments)
 
                 # Only apply if segmentation actually split the word (2+ segments)
                 if len(segments) > 1:
+                    segmented_text = ' '.join(segments)
                     segmented_words.append(segmented_text)
                     segmentations_applied += 1
                     logger.debug(f"Segmented: '{word}' -> '{segmented_text}'")

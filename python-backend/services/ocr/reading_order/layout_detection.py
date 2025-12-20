@@ -61,10 +61,11 @@ def detect_layout_type(word_boxes: List[WordBox],
     if middle_ratio > config.single_column_center_ratio:
         layout_type = "SINGLE_COLUMN"
 
-    # Multi-column: significant words on both left and right, few in middle
+    # Multi-column: significant words on both left and right
+    # Allow up to 30% in middle (for headers, photos, captions spanning columns)
     elif (left_ratio > config.multi_column_side_ratio and
           right_ratio > config.multi_column_side_ratio and
-          middle_ratio < 0.2):
+          middle_ratio < 0.35):
         layout_type = "MULTI_COLUMN"
 
     # Check for table structure

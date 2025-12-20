@@ -36,7 +36,8 @@ class ReadingOrderConfig:
 
     # Baseline tolerance as multiplier of average word height
     # Words with baselines within this tolerance are considered on same line
-    line_baseline_tolerance_multiplier: float = 0.3
+    # 0.6 allows more baseline variance (handles photo captures better)
+    line_baseline_tolerance_multiplier: float = 0.6
 
     # Maximum horizontal gap between words on same line
     # Expressed as multiplier of average word height
@@ -49,13 +50,23 @@ class ReadingOrderConfig:
     # Maximum Y-spread within a line (for skewed documents)
     # Expressed as multiplier of average word height
     # Higher values allow more vertical variation (for photos/skewed scans)
-    line_y_spread_multiplier: float = 0.6
+    # 1.5 allows up to 1.5x word height variation (handles photo captures better)
+    line_y_spread_multiplier: float = 1.5
 
     # Use clustering-based line formation (better for skewed docs)
+    # When False, uses faster greedy approach that works for well-aligned docs
     use_clustered_line_formation: bool = False
 
     # Use sequential scanning (best for skewed documents)
     use_sequential_line_formation: bool = False
+
+    # AUTO-DETECT SKEW: If True, automatically switch to clustered line formation
+    # when document skew is detected (skew angle > skew_detection_threshold)
+    auto_detect_skew: bool = True
+
+    # Threshold for skew detection (in degrees)
+    # Documents with estimated skew > this value use clustered line formation
+    skew_detection_threshold: float = 1.5  # Raised from 0.5 - less sensitive to photo alignment
 
     # Enable post-processing to fix line issues
     enable_post_processing: bool = True
@@ -73,7 +84,7 @@ class ReadingOrderConfig:
 
     # Threshold for single-column detection
     # If this fraction of words are in center third, it's single-column
-    single_column_center_ratio: float = 0.7
+    single_column_center_ratio: float = 0.60  # Lowered from 0.7 - more lenient for curved documents
 
     # Threshold for multi-column detection
     # If this fraction of words are on left AND right, it's multi-column
@@ -101,6 +112,10 @@ class ReadingOrderConfig:
 
     # Minimum valley width (pixels) to be considered a column gutter
     min_valley_width: float = 20.0
+
+    # Minimum distance between valleys (as fraction of page width)
+    # Valleys closer than this are merged (prevents false column splits)
+    min_inter_valley_ratio: float = 0.15
 
     # ==== Layer 3: Special Zones (Headers/Footers) ====
 
@@ -176,17 +191,27 @@ class ReadingOrderConfig:
     def for_multi_column(cls) -> 'ReadingOrderConfig':
         """
         Preset for multi-column documents like newspapers or magazines.
-        
+
         Use for: Newspapers, magazines, academic papers with columns.
-        
+
         Adjustments:
-        - Stricter horizontal gap to detect column boundaries
-        - Lower column separation threshold
+        - MORE PERMISSIVE line formation (column detection handles separation)
+        - Strict column detection via projection histogram
+        - Minimum inter-valley distance to avoid false columns
         """
         return cls(
-            line_horizontal_gap_multiplier=2.0,
+            # MORE PERMISSIVE line formation (column detection handles separation)
+            line_horizontal_gap_multiplier=4.0,      # Was 2.0 - allow wider gaps within columns
+            line_baseline_tolerance_multiplier=0.5,  # Was 0.3 - more lenient baseline matching
+            line_y_spread_multiplier=1.0,            # Was 0.6 - allow more vertical variation
+
+            # Keep strict column detection (these work well)
             column_separation_threshold=0.10,
             multi_column_side_ratio=0.25,
+            min_valley_width=20.0,
+            valley_density_threshold=0.3,
+            histogram_smooth_sigma=10.0,
+            min_inter_valley_ratio=0.20,
         )
 
     @classmethod

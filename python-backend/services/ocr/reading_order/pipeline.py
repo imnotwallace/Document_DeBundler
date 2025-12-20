@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from .data_structures import WordBox, Line, Block, Region
 from .config import ReadingOrderConfig
 from .normalization import normalize_input, filter_noise, group_by_page
-from .line_formation import form_lines, form_lines_clustered, form_lines_sequential, post_process_lines, get_average_word_height
+from .line_formation import form_lines, form_lines_clustered, form_lines_sequential, post_process_lines, get_average_word_height, estimate_skew_angle
 from .block_formation import form_blocks
 from .layout_detection import detect_layout_type
 from .column_detection import detect_columns_by_projection
@@ -26,6 +26,69 @@ from .reading_order import assign_reading_order
 from .text_output import generate_ordered_text, generate_ordered_text_with_coordinates
 
 logger = logging.getLogger(__name__)
+
+
+def _detect_y_coordinate_variance(word_boxes: List[WordBox], avg_height: float) -> float:
+    """
+    Detect y-coordinate variance within visual lines.
+
+    High variance indicates photographed/curved documents where words on the
+    same visual line have varying y-coordinates. This suggests sequential
+    line formation (which groups by y-proximity first) would work better than
+    greedy formation (which processes in y0,x0 sort order).
+
+    Returns:
+        Ratio of actual variance to average height (0.0 = no variance, >1.0 = high variance)
+    """
+    if len(word_boxes) < 10 or avg_height <= 0:
+        return 0.0
+
+    import numpy as np
+
+    # Group words into approximate visual lines by y-center
+    # Use a coarse tolerance (2x avg_height) to capture full lines
+    y_centers = sorted([w.center_y for w in word_boxes])
+    tolerance = avg_height * 2.0
+
+    # Find visual line groups
+    visual_lines = []
+    current_group = [y_centers[0]]
+
+    for y in y_centers[1:]:
+        if y - current_group[0] <= tolerance:
+            current_group.append(y)
+        else:
+            if len(current_group) >= 3:  # Only consider lines with 3+ words
+                visual_lines.append(current_group)
+            current_group = [y]
+
+    if len(current_group) >= 3:
+        visual_lines.append(current_group)
+
+    if not visual_lines:
+        return 0.0
+
+    # Calculate Y-spread (range) within each visual line
+    # Using range (max-min) instead of std deviation because:
+    # - A 40px spread in a 60px height line clearly indicates curvature
+    # - Std deviation underestimates the spread (40px range -> ~13px std dev)
+    spreads = []
+    for line_y_values in visual_lines:
+        if len(line_y_values) >= 3:
+            y_range = max(line_y_values) - min(line_y_values)
+            spreads.append(y_range)
+
+    if not spreads:
+        return 0.0
+
+    # Return average spread as ratio of avg_height
+    # A ratio > 0.5 means the y-spread within lines exceeds half the line height
+    avg_spread = np.mean(spreads)
+    variance_ratio = avg_spread / avg_height
+
+    logger.debug(f"Y-variance detection: avg_spread={avg_spread:.1f}px, avg_height={avg_height:.1f}px, ratio={variance_ratio:.2f}")
+
+    return variance_ratio
 
 
 def process_reading_order(ocr_results: List[Dict[str, Any]],
@@ -85,14 +148,17 @@ def process_reading_order(ocr_results: List[Dict[str, Any]],
 
     # Convert OCR results to WordBox objects
     word_boxes = []
-    for ocr_item in ocr_results:
+    for i, ocr_item in enumerate(ocr_results):
         try:
             word_box = WordBox.from_ocr_result(
                 text=ocr_item['text'],
                 bbox=ocr_item['bbox'],
                 page=ocr_item.get('page', 0),
-                confidence=ocr_item.get('confidence', 1.0)
+                confidence=ocr_item.get('confidence', 1.0),
+                center_y_override=ocr_item.get('center_y', None)  # For curved text accuracy
             )
+            # Preserve original index from OCR result or use enumeration index
+            word_box.original_index = ocr_item.get('_original_index', i)
             word_boxes.append(word_box)
         except Exception as e:
             logger.warning(f"Failed to convert OCR result to WordBox: {e}")
@@ -130,17 +196,59 @@ def process_reading_order(ocr_results: List[Dict[str, Any]],
     page_words = pages_dict[page_num]
 
     # Form lines from words
-    if config.use_sequential_line_formation:
+    # Determine which line formation method to use
+    use_clustered = config.use_clustered_line_formation
+    use_sequential = config.use_sequential_line_formation
+    
+    # Calculate y_variance_ratio for potential use in clustered formation
+    avg_height = get_average_word_height(page_words)
+    y_variance_ratio = _detect_y_coordinate_variance(page_words, avg_height)
+
+    # AUTO-DETECT: Check document characteristics for best line formation method
+    if config.auto_detect_skew and not use_clustered and not use_sequential:
+        import math
+        import numpy as np
+
+        # Check 1: Document skew (rotation)
+        skew_angle = estimate_skew_angle(page_words)
+        skew_degrees = abs(math.degrees(skew_angle))
+
+        # Decision logic:
+        # - High skew (> threshold) -> use clustered (handles rotation well)
+        # - High y-variance (> 0.5) -> use clustered (handles book spine curvature)
+        # - Otherwise -> use default greedy approach
+        # Note: Clustered formation works well for both rotation AND curvature because
+        # it groups by y-coordinate proximity rather than strict y0 sorting.
+        if skew_degrees > config.skew_detection_threshold:
+            logger.info(f"Auto-detected skew: {skew_degrees:.2f} degrees > threshold {config.skew_detection_threshold}, using clustered line formation")
+            use_clustered = True
+        elif y_variance_ratio > 0.8:
+            # Heavy curvature/rotation - clustered formation handles this well
+            logger.info(f"Auto-detected high y-variance: {y_variance_ratio:.2f} > threshold 0.8, using clustered line formation")
+            use_clustered = True
+        elif y_variance_ratio > 0.5:
+            # Moderate curvature (typical book spine) - use greedy with tighter tolerance
+            logger.info(f"Moderate y-variance: {y_variance_ratio:.2f} (0.5-0.8 range) - using greedy with reduced tolerance")
+            # Adjust config for tighter line grouping to prevent merging adjacent lines
+            config = ReadingOrderConfig(
+                **{k: v for k, v in config.__dict__.items() if k != 'line_y_spread_multiplier'},
+                line_y_spread_multiplier=1.0  # Tighter than default 1.5
+            )
+        else:
+            logger.debug(f"Skew check: {skew_degrees:.2f} degrees, y-variance: {y_variance_ratio:.2f} - using default line formation")
+
+    if use_sequential:
         lines = form_lines_sequential(page_words, page_height, config)
-    elif config.use_clustered_line_formation:
-        lines = form_lines_clustered(page_words, page_height, config)
+    elif use_clustered:
+        lines = form_lines_clustered(page_words, page_height, config, y_variance_ratio=y_variance_ratio, page_width=page_width)
     else:
         lines = form_lines(page_words, page_height, config)
 
     # Post-process to fix common issues
+    # Pass y_variance_ratio to disable line splitting for curved documents
     if config.enable_post_processing and lines:
         avg_height = get_average_word_height(page_words)
-        lines = post_process_lines(lines, avg_height)
+        lines = post_process_lines(lines, avg_height, y_variance_ratio)
 
     if not lines:
         logger.warning("No lines formed from words")
@@ -155,7 +263,8 @@ def process_reading_order(ocr_results: List[Dict[str, Any]],
         logger.info(f"DEBUG: First 5 lines: {[line.get_text()[:50] for line in lines[:5]]}")
 
     # Form blocks from lines
-    blocks = form_blocks(lines, page_width, page_height, config)
+    # Pass y_variance_ratio to relax horizontal overlap for curved documents
+    blocks = form_blocks(lines, page_width, page_height, config, y_variance_ratio)
 
     if not blocks:
         logger.warning("No blocks formed from lines")
@@ -510,7 +619,8 @@ def _process_with_florence_hints(
                 text=ocr_item['text'],
                 bbox=ocr_item['bbox'],
                 page=ocr_item.get('page', 0),
-                confidence=ocr_item.get('confidence', 1.0)
+                confidence=ocr_item.get('confidence', 1.0),
+                center_y_override=ocr_item.get('center_y', None)  # For curved text accuracy
             )
             word_boxes.append(word_box)
         except Exception as e:

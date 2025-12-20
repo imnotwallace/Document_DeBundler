@@ -73,6 +73,84 @@ def estimate_skew_angle(word_boxes: List[WordBox]) -> float:
     return angle
 
 
+
+def _split_overlapping_clusters(cluster_words: List[WordBox], avg_height: float, page_width: float) -> List[List[WordBox]]:
+    """
+    Split a cluster if it contains words that overlap horizontally.
+    
+    When two full-width text blocks from adjacent lines get merged into one cluster,
+    they need to be split back into separate lines based on y-coordinate.
+    
+    Detection criteria:
+    - Words are "wide" if they span > 40% of page width
+    - Two wide words "overlap" if their x-ranges intersect significantly (> 50%)
+    - If overlapping wide words exist, split by y-coordinate
+    
+    Args:
+        cluster_words: Words in a single cluster
+        avg_height: Average word height
+        page_width: Page width in pixels
+        
+    Returns:
+        List of word groups (each becomes a separate line)
+    """
+    if len(cluster_words) <= 1:
+        return [cluster_words]
+    
+    # Check for wide words (spanning significant page width)
+    wide_threshold = page_width * 0.35  # Word is "wide" if > 35% of page width
+    wide_words = [(i, w) for i, w in enumerate(cluster_words) if (w.x1 - w.x0) > wide_threshold]
+    
+    if len(wide_words) < 2:
+        # No overlapping wide words possible
+        return [cluster_words]
+    
+    # Check for significant x-overlap between wide words
+    has_overlap = False
+    for i in range(len(wide_words)):
+        for j in range(i + 1, len(wide_words)):
+            w1, w2 = wide_words[i][1], wide_words[j][1]
+            # Calculate overlap ratio
+            overlap_start = max(w1.x0, w2.x0)
+            overlap_end = min(w1.x1, w2.x1)
+            if overlap_end > overlap_start:
+                overlap_width = overlap_end - overlap_start
+                min_width = min(w1.x1 - w1.x0, w2.x1 - w2.x0)
+                overlap_ratio = overlap_width / min_width if min_width > 0 else 0
+                if overlap_ratio > 0.5:
+                    has_overlap = True
+                    break
+        if has_overlap:
+            break
+    
+    if not has_overlap:
+        return [cluster_words]
+    
+    # Split by y-coordinate - sort by center_y and find natural gaps
+    sorted_words = sorted(cluster_words, key=lambda w: w.center_y)
+    
+    # Find gaps between consecutive words
+    groups = [[sorted_words[0]]]
+    gap_threshold = avg_height * 0.5  # Split if gap > 50% of avg height
+    
+    for i in range(1, len(sorted_words)):
+        prev_word = sorted_words[i - 1]
+        curr_word = sorted_words[i]
+        gap = curr_word.center_y - prev_word.center_y
+        
+        if gap > gap_threshold:
+            # Start new group
+            groups.append([curr_word])
+        else:
+            # Add to current group
+            groups[-1].append(curr_word)
+    
+    if len(groups) > 1:
+        logger.debug(f"Split cluster with {len(cluster_words)} overlapping words into {len(groups)} groups")
+    
+    return groups
+
+
 def deskew_coordinates(word_boxes: List[WordBox], angle: float) -> None:
     """
     Adjust word box y-coordinates to compensate for skew.
@@ -102,11 +180,14 @@ def deskew_coordinates(word_boxes: List[WordBox], angle: float) -> None:
         
         word.y0 += dy
         word.y1 += dy
+        word.center_y = (word.y0 + word.y1) / 2  # Update center_y after deskewing!
 
 
 def form_lines_clustered(word_boxes: List[WordBox],
                          page_height: float,
-                         config: ReadingOrderConfig) -> List[Line]:
+                         config: ReadingOrderConfig,
+                         y_variance_ratio: float = 0.0,
+                         page_width: float = 0.0) -> List[Line]:
     """
     Alternative line formation using y-coordinate clustering.
     
@@ -116,6 +197,13 @@ def form_lines_clustered(word_boxes: List[WordBox],
     Uses adaptive thresholds based on document characteristics:
     - Estimates skew angle and compensates
     - Measures line spacing to set appropriate cluster threshold
+    - Boosts threshold for curved documents (high y_variance_ratio)
+    
+    Args:
+        word_boxes: List of WordBox instances
+        page_height: Page height in pixels
+        config: ReadingOrderConfig
+        y_variance_ratio: Detected y-variance ratio (0.0 = no variance, >0.5 = curved)
     """
     if not word_boxes:
         return []
@@ -123,7 +211,7 @@ def form_lines_clustered(word_boxes: List[WordBox],
     import numpy as np
     from scipy.cluster.hierarchy import fclusterdata
     
-    logger.info(f"Forming lines (clustered) from {len(word_boxes)} words")
+    logger.info(f"Forming lines (clustered) from {len(word_boxes)} words, y_variance_ratio={y_variance_ratio:.2f}")
 
     # Apply skew compensation first
     skew_angle = estimate_skew_angle(word_boxes)
@@ -163,8 +251,26 @@ def form_lines_clustered(word_boxes: List[WordBox],
         else:
             cluster_threshold = avg_height * 1.0
         
+        # BOOST THRESHOLD FOR CURVED DOCUMENTS
+        # When y_variance_ratio is high, words on the same visual line have
+        # significant y-coordinate differences due to book spine curvature.
+        # We need a more generous threshold to keep them together.
+        #
+        # Key insight: For curved book pages:
+        # - Intra-line y-spread: ~40px (what we need to accommodate)
+        # - Inter-line y-gap: ~60-80px (what we must NOT merge)
+        # So we need a threshold around 50-60px, not 100px+
+        if y_variance_ratio > 0.5:
+            # Conservative boost: minimal adjustment to prevent merging adjacent lines
+            # Scale boost: 0.5 -> 1.075x, 1.0 -> 1.15x (very conservative)
+            curvature_boost = 1.0 + y_variance_ratio * 0.15
+            cluster_threshold = cluster_threshold * curvature_boost
+            logger.info(f"Boosting threshold for curved document: {curvature_boost:.2f}x (y_variance={y_variance_ratio:.2f})")
+
         # Clamp to reasonable range
-        cluster_threshold = max(avg_height * 0.6, min(cluster_threshold, avg_height * 2.5))
+        # For curved documents, use a higher MAX but still conservative
+        max_multiplier = 2.5 if y_variance_ratio <= 0.5 else 3.0
+        cluster_threshold = max(avg_height * 0.6, min(cluster_threshold, avg_height * max_multiplier))
         
         logger.debug(f"Adaptive threshold: {cluster_threshold:.1f}, avg_height={avg_height:.1f}")
     else:
@@ -174,14 +280,40 @@ def form_lines_clustered(word_boxes: List[WordBox],
     # Reshape for clustering
     y_centers_2d = y_centers.reshape(-1, 1)
     
+    # Log the final threshold being used
+    logger.info(f"CLUSTERING: threshold={cluster_threshold:.1f}px, avg_height={avg_height:.1f}px, words={len(word_boxes)}")
+
     try:
         # Hierarchical clustering
         clusters = fclusterdata(
-            y_centers_2d, 
+            y_centers_2d,
             t=cluster_threshold,
             criterion='distance',
             method='complete'  # Use max distance between cluster members
         )
+
+        # Log clustering results
+        num_clusters = len(set(clusters))
+        logger.info(f"CLUSTERING: Formed {num_clusters} clusters from {len(word_boxes)} words")
+
+        # Debug: Find target words and their cluster assignments
+        target_texts = ['lives', 'helps', 'remove', 'burdens', 'excite', 'hopes', 'increase', 'faith']
+        target_clusters = {}
+        for i, wb in enumerate(word_boxes):
+            for target in target_texts:
+                if target.lower() in wb.text.lower():
+                    cluster_id = clusters[i]
+                    if cluster_id not in target_clusters:
+                        target_clusters[cluster_id] = []
+                    target_clusters[cluster_id].append((wb.text, wb.center_y))
+                    break
+
+        if target_clusters:
+            logger.debug(f"TARGET WORDS: Found in {len(target_clusters)} cluster(s)")
+            for cid, words in target_clusters.items():
+                word_str = ", ".join([f"'{w[0]}'({w[1]:.1f})" for w in words])
+                logger.debug(f"  Cluster {cid}: {word_str}")
+
     except Exception as e:
         logger.warning(f"Clustering failed: {e}, falling back to greedy")
         return form_lines(word_boxes, page_height, config)
@@ -199,15 +331,22 @@ def form_lines_clustered(word_boxes: List[WordBox],
         key=lambda x: np.mean([w.center_y for w in x[1]])
     )
     
-    # Create lines from clusters
+    # Create lines from clusters, splitting any with overlapping words
     lines = []
-    for line_id, (cluster_id, words) in enumerate(sorted_clusters):
-        # Sort words within cluster by x-position (left to right)
-        sorted_words = sorted(words, key=lambda w: w.x0)
+    line_id = 0
+    for cluster_id, words in sorted_clusters:
+        # Check for and split clusters with overlapping full-width words
+        # This fixes the bug where adjacent lines get merged due to aggressive clustering
+        word_groups = _split_overlapping_clusters(words, avg_height, page_width if page_width > 0 else 2630)
         
-        # Create line
-        line = _create_line(sorted_words, line_id)
-        lines.append(line)
+        for group in word_groups:
+            # Sort words within group by x-position (left to right)
+            sorted_words = sorted(group, key=lambda w: w.x0)
+            
+            # Create line
+            line = _create_line(sorted_words, line_id)
+            lines.append(line)
+            line_id += 1
     
     logger.info(f"Formed {len(lines)} lines using adaptive clustering")
     
@@ -218,113 +357,210 @@ def form_lines_sequential(word_boxes: List[WordBox],
                           page_height: float,
                           config: ReadingOrderConfig) -> List[Line]:
     """
-    Form lines using a sweep-line approach with y-tolerance grouping.
-    
-    This approach groups words with similar y-coordinates together,
-    respecting horizontal continuity within each group.
-    
-    Better than pure clustering for skewed documents because it
-    processes words in reading order and won't interleave.
+    Form lines using horizontal-continuity-first approach.
+
+    For curved/skewed documents, words on the same visual line may have
+    different y-coordinates. This algorithm:
+    1. Sorts words by x0 (left to right)
+    2. Groups horizontally-adjacent words
+    3. Sorts groups by average y to get top-to-bottom order
+    4. Merges groups that are close in y (same visual line wrapping)
+
+    This handles:
+    - Book spine curvature (left side lower, right side higher)
+    - Skewed documents
+    - Single-column wrapped text
     """
     if not word_boxes:
         return []
-    
+
     import numpy as np
-    
+
     logger.info(f"Forming lines (sequential) from {len(word_boxes)} words")
-    
-    # Apply skew compensation first
+
+    # Calculate average word height for thresholds
+    avg_height = get_average_word_height(word_boxes)
+    if avg_height == 0:
+        return []
+
+    # Apply skew compensation
     skew_angle = estimate_skew_angle(word_boxes)
     if abs(skew_angle) > 0.001:
         import math
         logger.info(f"Compensating for skew: {math.degrees(skew_angle):.2f} degrees")
         deskew_coordinates(word_boxes, skew_angle)
-    
-    # Calculate average word height for thresholds
-    avg_height = get_average_word_height(word_boxes)
-    if avg_height == 0:
-        return []
-    
-    # Sort words primarily by y_center (top to bottom)
-    sorted_words = sorted(word_boxes, key=lambda w: w.center_y)
-    
-    # Y-tolerance for grouping words on same line
-    # This is the key parameter - how much y-variation is allowed within a line
-    y_tolerance = avg_height * 1.1
-    
-    # Sweep through words, grouping by y-tolerance
-    lines = []
-    current_line_words = [sorted_words[0]]
-    current_line_y = sorted_words[0].center_y
-    
-    for i in range(1, len(sorted_words)):
-        word = sorted_words[i]
-        
-        # Check if this word belongs to the current line (within y-tolerance)
-        y_diff = abs(word.center_y - current_line_y)
-        
-        if y_diff <= y_tolerance:
-            # Same line - add to current group
-            current_line_words.append(word)
-            # Update line y to be the mean of all words in line
-            current_line_y = sum(w.center_y for w in current_line_words) / len(current_line_words)
+
+    # Y-tolerance for line membership (after deskew)
+    y_tolerance = avg_height * config.line_y_spread_multiplier
+
+    # STEP 1: Sort all words by x0 (left to right)
+    x_sorted_words = sorted(word_boxes, key=lambda w: w.x0)
+
+    # STEP 2: Group horizontally-adjacent words into "segments"
+    # A segment is a run of words that are horizontally continuous
+    segments = []
+    current_segment = [x_sorted_words[0]]
+
+    for i in range(1, len(x_sorted_words)):
+        word = x_sorted_words[i]
+        prev_word = current_segment[-1]
+
+        # Check if horizontally continuous (gap < 3x avg_height)
+        gap = word.x0 - prev_word.x1
+        is_continuous = gap < avg_height * 3.0
+
+        # Also check vertical proximity (should be roughly on same line)
+        y_close = abs(word.center_y - prev_word.center_y) < y_tolerance * 2
+
+        if is_continuous and y_close:
+            current_segment.append(word)
         else:
-            # New line - finalize current and start new
-            if current_line_words:
-                # Sort by x within line (left to right)
-                sorted_line = sorted(current_line_words, key=lambda w: w.x0)
-                line = _create_line(sorted_line, len(lines))
-                lines.append(line)
-            
-            current_line_words = [word]
-            current_line_y = word.center_y
-    
-    # Don't forget the last line
-    if current_line_words:
-        sorted_line = sorted(current_line_words, key=lambda w: w.x0)
-        line = _create_line(sorted_line, len(lines))
+            segments.append(current_segment)
+            current_segment = [word]
+
+    segments.append(current_segment)  # Don't forget last segment
+
+    logger.debug(f"Created {len(segments)} horizontal segments")
+
+    # STEP 3: Calculate average y and x-range for each segment
+    segment_info = []
+    for seg in segments:
+        avg_y = sum(w.center_y for w in seg) / len(seg)
+        min_x = min(w.x0 for w in seg)
+        max_x = max(w.x1 for w in seg)
+        segment_info.append({
+            'words': seg,
+            'avg_y': avg_y,
+            'min_x': min_x,
+            'max_x': max_x
+        })
+
+    # STEP 4: Sort segments by average y (top to bottom after deskew)
+    segment_info.sort(key=lambda s: s['avg_y'])
+
+    # STEP 5: Merge segments that are on the same visual line
+    # Two segments can be merged if:
+    # - Their y-values are close (within tolerance)
+    # - They don't horizontally overlap much
+    # - They're NOT both "full-width" segments (which would be separate lines)
+    lines = []
+    line_id_counter = 0
+
+    # Calculate page width from word positions for width threshold
+    all_x0 = [w.x0 for w in word_boxes]
+    all_x1 = [w.x1 for w in word_boxes]
+    page_left = min(all_x0)
+    page_right = max(all_x1)
+    page_width = page_right - page_left
+
+    # A segment is "wide" if it spans > 40% of page width
+    wide_threshold = page_width * 0.4
+
+    merged_indices = set()
+    for i, seg_i in enumerate(segment_info):
+        if i in merged_indices:
+            continue
+
+        # Start a line with this segment
+        line_words = list(seg_i['words'])
+        current_y = seg_i['avg_y']
+        seg_i_width = seg_i['max_x'] - seg_i['min_x']
+
+        # Track combined x-range for the growing line
+        line_min_x = seg_i['min_x']
+        line_max_x = seg_i['max_x']
+
+        # Look for other segments that could be on the same visual line
+        for j in range(i + 1, len(segment_info)):
+            if j in merged_indices:
+                continue
+
+            seg_j = segment_info[j]
+            seg_j_width = seg_j['max_x'] - seg_j['min_x']
+
+            # Check if y is close enough
+            if abs(seg_j['avg_y'] - current_y) > y_tolerance:
+                # Too far in y - since sorted by y, no more matches
+                break
+
+            # Check if both segments are "wide" - if so, they're separate lines
+            if seg_i_width > wide_threshold and seg_j_width > wide_threshold:
+                continue  # Don't merge two wide segments
+
+            # Check horizontal relationship - should not overlap much
+            overlap = min(line_max_x, seg_j['max_x']) - max(line_min_x, seg_j['min_x'])
+
+            if overlap < avg_height:  # Allow small overlap
+                # Check combined width wouldn't be too wide for a single line
+                combined_min = min(line_min_x, seg_j['min_x'])
+                combined_max = max(line_max_x, seg_j['max_x'])
+                combined_width = combined_max - combined_min
+
+                # Only merge if combined width is reasonable (< 95% of page width per segment)
+                # This prevents merging segments from adjacent lines that together span the page
+                if combined_width < page_width * 0.95 or len(line_words) <= 3:
+                    # Merge this segment
+                    line_words.extend(seg_j['words'])
+                    merged_indices.add(j)
+                    # Update line's x-range
+                    line_min_x = combined_min
+                    line_max_x = combined_max
+
+        # Create line from collected words (sort by x)
+        sorted_line_words = sorted(line_words, key=lambda w: w.x0)
+        line = _create_line(sorted_line_words, line_id_counter)
         lines.append(line)
-    
+        line_id_counter += 1
+
     logger.info(f"Formed {len(lines)} lines using sequential sweep")
     
     return lines
 
 
-def post_process_lines(lines: List[Line], avg_height: float) -> List[Line]:
+def post_process_lines(lines: List[Line], avg_height: float, y_variance_ratio: float = 0.0) -> List[Line]:
     """
     Post-process lines to fix common issues.
-    
+
     1. Verify horizontal ordering within each line
-    2. Split over-long lines at large gaps
+    2. Split over-long lines at large gaps (DISABLED for curved documents)
     3. Validate punctuation positioning
-    
+
     Args:
         lines: List of Line objects
         avg_height: Average word height for threshold calculations
-        
+        y_variance_ratio: Y-variance ratio (>0.5 = curved document, disables line splitting)
+
     Returns:
         Corrected list of Line objects
     """
     if not lines:
         return lines
-    
+
+    # For curved documents (high y-variance), DON'T split lines
+    # The clustering already correctly grouped words on the same visual line
+    # Splitting would break up correctly-formed lines
+    disable_line_splitting = y_variance_ratio > 0.5
+    if disable_line_splitting:
+        logger.info(f"post_process_lines: Disabling line splitting for curved document (y_variance={y_variance_ratio:.2f})")
+
     corrected_lines = []
     line_id = 0
-    
+
     for line in lines:
         # Step 1: Ensure words are sorted by x-position
         sorted_words = sorted(line.words, key=lambda w: w.x0)
-        
+
         # Step 2: Check for large gaps that might indicate merged lines
-        if len(sorted_words) > 1:
+        # SKIP this step for curved documents
+        if len(sorted_words) > 1 and not disable_line_splitting:
             gaps = []
             for i in range(len(sorted_words) - 1):
                 gap = sorted_words[i + 1].x0 - sorted_words[i].x1
                 gaps.append((i, gap))
-            
+
             # Calculate average gap
             avg_gap = sum(g[1] for g in gaps) / len(gaps) if gaps else 0
-            
+
             # Find split points: gaps that are much larger than average
             # or the line has too many words
             split_points = []
@@ -336,13 +572,13 @@ def post_process_lines(lines: List[Line], avg_height: float) -> List[Line]:
                     # 3. Gap is very large (>1.5x word height)
                     is_long_line = len(sorted_words) > 8
                     is_very_long_line = len(sorted_words) > 15
-                    
+
                     should_split = (
                         (gap > avg_gap * 2.5 and is_long_line) or
                         (gap > avg_gap * 2.0 and is_very_long_line) or
                         (gap > avg_height * 1.5 and len(sorted_words) > 6)
                     )
-                    
+
                     if should_split:
                         split_points.append(i + 1)
             
@@ -369,11 +605,11 @@ def post_process_lines(lines: List[Line], avg_height: float) -> List[Line]:
                 corrected_lines.append(new_line)
                 line_id += 1
         else:
-            # Single word line
+            # Single word line OR line splitting disabled
             new_line = _create_line(sorted_words, line_id)
             corrected_lines.append(new_line)
             line_id += 1
-    
+
     if len(corrected_lines) != len(lines):
         logger.info(f"Post-processing: split {len(lines)} lines into {len(corrected_lines)}")
     

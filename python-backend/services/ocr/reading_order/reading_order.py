@@ -205,9 +205,16 @@ def _handle_two_column_layout(regions: List[Region],
 
 def _handle_multi_column_layout(regions: List[Region]) -> List[Region]:
     """
-    Handle 3+ column layout.
+    Handle 3+ column layout with spanning header detection.
 
-    Reading order: left to right, top to bottom within each column.
+    First detects blocks that span across columns at similar Y positions,
+    then reads remaining blocks column by column.
+
+    Reading order:
+    1. Spanning headers (blocks at same Y across columns)
+    2. Column 0 content top-to-bottom
+    3. Column 1 content top-to-bottom
+    4. etc.
 
     Args:
         regions: List of Region instances (already sorted left to right)
@@ -217,19 +224,113 @@ def _handle_multi_column_layout(regions: List[Region]) -> List[Region]:
     """
     logger.debug(f"Multi-column layout: {len(regions)} columns")
 
+    # Collect all blocks with their region info
+    all_blocks = []
+    for region_idx, region in enumerate(regions):
+        for block in region.blocks:
+            all_blocks.append({
+                'block': block,
+                'region_idx': region_idx,
+                'y': block.y0
+            })
+
+    # Detect spanning headers: ONLY in the top portion of the page
+    # Find the minimum Y position of any block - this is the top of content
+    if not all_blocks:
+        return regions
+
+    min_y = min(item['y'] for item in all_blocks)
+    max_y = max(item['y'] for item in all_blocks)
+    content_height = max_y - min_y
+
+    # Only detect spanning rows in the top 15% of content area
+    spanning_zone_threshold = min_y + content_height * 0.15
+    y_tolerance = 50  # Blocks within 50px vertical are considered same row
+
+    spanning_blocks = []
+    column_blocks_by_region = {i: [] for i in range(len(regions))}
+
+    # Group blocks by Y position
+    y_groups = {}
+    for item in all_blocks:
+        y_rounded = round(item['y'] / y_tolerance) * y_tolerance
+        if y_rounded not in y_groups:
+            y_groups[y_rounded] = []
+        y_groups[y_rounded].append(item)
+
+    # Check each Y group for spanning rows (only in top zone)
+    for y_pos, items in y_groups.items():
+        avg_y = sum(item['y'] for item in items) / len(items)
+
+        # Only consider spanning in the header zone
+        if avg_y > spanning_zone_threshold:
+            # Below header zone - all go to column content
+            for item in items:
+                column_blocks_by_region[item['region_idx']].append(item['block'])
+            continue
+
+        regions_in_group = set(item['region_idx'] for item in items)
+
+        # If blocks at this Y exist in multiple regions AND in header zone, it's spanning
+        if len(regions_in_group) > 1:
+            # Sort by X position (left to right)
+            items.sort(key=lambda x: x['block'].x0)
+            for item in items:
+                spanning_blocks.append(item)
+            logger.debug(f"Spanning header at y~{y_pos}: {len(items)} blocks across {len(regions_in_group)} columns")
+        else:
+            # Single-region blocks go to column content even in header zone
+            for item in items:
+                column_blocks_by_region[item['region_idx']].append(item['block'])
+
+    # Sort spanning blocks by Y, then X
+    spanning_blocks.sort(key=lambda x: (x['y'], x['block'].x0))
+
+    # Assign reading order: spanning headers first, then columns
     reading_order = 0
 
-    for region in regions:
-        region.reading_order = reading_order
+    # Process spanning headers first
+    for item in spanning_blocks:
+        block = item['block']
+        block.reading_order = reading_order
+        block.block_type = "spanning_header"
+        reading_order += 1
 
-        # Within each region, sort blocks top to bottom
-        sorted_blocks = sorted(region.blocks, key=lambda b: b.y0)
+    # If we have spanning blocks, create a spanning region and prepend it
+    output_regions = []
+    if spanning_blocks:
+        # Create a spanning header region
+        spanning_block_objects = [item['block'] for item in spanning_blocks]
+        spanning_region = Region(
+            blocks=spanning_block_objects,
+            x0=min(b.x0 for b in spanning_block_objects),
+            x1=max(b.x1 for b in spanning_block_objects),
+            region_id=-1,  # Special ID for spanning
+            region_type="spanning_header"
+        )
+        spanning_region.reading_order = -1  # Goes first
+        output_regions.append(spanning_region)
+        logger.debug(f"Created spanning region with {len(spanning_block_objects)} blocks")
 
-        for block in sorted_blocks:
+    # Process column content
+    for region_idx, region in enumerate(regions):
+        region.reading_order = region_idx
+        # Get remaining blocks for this region (non-spanning)
+        remaining_blocks = column_blocks_by_region[region_idx]
+        # Sort by Y position
+        remaining_blocks.sort(key=lambda b: b.y0)
+        region.blocks = remaining_blocks
+
+        logger.debug(f"Column {region_idx}: {len(remaining_blocks)} blocks after removing spanning")
+
+        for block in remaining_blocks:
             block.reading_order = reading_order
             reading_order += 1
 
-    return regions
+        if remaining_blocks:  # Only add non-empty regions
+            output_regions.append(region)
+
+    return output_regions
 
 
 # ============================================================================

@@ -34,6 +34,11 @@ from .ocr.base import OCRResult
 from .ocr.intelligent_preprocessing import IntelligentPreprocessor
 from .memory_monitor import MemoryMonitor
 
+# Reading order pipeline for proper text ordering
+from .ocr.reading_order.pipeline import process_reading_order
+from .ocr.reading_order.data_structures import WordBox
+from .ocr.reading_order.config import ReadingOrderConfig
+
 # Multi-pass pipeline with Florence-2 layout analysis
 from .ocr.multipass.pipeline_orchestrator import MultiPassPipelineOrchestrator
 from .ocr.multipass.pass_config import MultiPassConfig
@@ -1376,9 +1381,9 @@ class OCRBatchService:
         """
         try:
             from .ocr.coordinate_mapper import CoordinateMapper
-            
+
             mapper = CoordinateMapper()
-            
+
             # Get text lines and bounding boxes from OCR result
             # OCR result format varies by engine, handle both
             if hasattr(ocr_result, 'raw_result') and ocr_result.raw_result:
@@ -1394,7 +1399,30 @@ class OCRBatchService:
                 if not success:
                     logger.error("TextWriter fallback failed!")
                 return
-            
+
+            # ========================================================================
+            # READING ORDER PROCESSING - Fix text ordering before insertion
+            # ========================================================================
+            # Convert extracted text/boxes to proper reading order using our pipeline
+            logger.info(f"READING ORDER: text_lines={len(text_lines)}, bboxes={len(bboxes)}")
+            if text_lines and bboxes:
+                if len(text_lines) == len(bboxes):
+                    try:
+                        logger.info(f"READING ORDER: Calling _apply_reading_order...")
+                        text_lines, bboxes = self._apply_reading_order(
+                            text_lines, bboxes, page_rect.width, page_rect.height
+                        )
+                        logger.info(f"READING ORDER: Applied to {len(text_lines)} text elements")
+                    except Exception as e:
+                        logger.warning(f"Reading order processing failed, using raw order: {e}")
+                        import traceback
+                        logger.debug(traceback.format_exc())
+                else:
+                    logger.warning(f"READING ORDER: Skipped - mismatched counts: {len(text_lines)} vs {len(bboxes)}")
+            else:
+                logger.warning(f"READING ORDER: Skipped - empty text_lines or bboxes")
+            # ========================================================================
+
             # Get image dimensions from OCR result (actual dimensions used for OCR)
             # This accounts for any preprocessing that may have changed dimensions
             dpi = 300  # Default DPI for coordinate mapping
@@ -1511,14 +1539,28 @@ class OCRBatchService:
                             poly = poly.tolist()
                         bboxes.append(poly)
 
-            # PaddleOCR 3.x wrapped format: list containing dict
+            # PaddleOCR 3.x wrapped format: list containing dict or dict-like OCRResult
             elif isinstance(raw_result, list) and len(raw_result) > 0:
                 first_item = raw_result[0]
 
-                # Check if it's the new wrapped format with nested dict
-                if isinstance(first_item, dict) and 'rec_texts' in first_item:
-                    texts = first_item.get('rec_texts', [])
-                    polys = first_item.get('rec_polys', [])
+                # Check if it's PaddleOCR 3.x format - could be dict or dict-like OCRResult object
+                # OCRResult has dict-like interface: use 'key in obj' instead of hasattr
+                has_rec_texts = hasattr(first_item, 'rec_texts') or (hasattr(first_item, '__contains__') and 'rec_texts' in first_item)
+                has_rec_polys = hasattr(first_item, 'rec_polys') or (hasattr(first_item, '__contains__') and 'rec_polys' in first_item)
+
+                if has_rec_texts and has_rec_polys:
+                    # Handle dict, dict-like objects, and attribute access
+                    if hasattr(first_item, '__getitem__'):
+                        # Use item access for dict-like objects
+                        texts = first_item['rec_texts']
+                        polys = first_item['rec_polys']
+                    elif hasattr(first_item, 'rec_texts'):
+                        # Use attribute access
+                        texts = first_item.rec_texts
+                        polys = first_item.rec_polys
+                    else:
+                        texts = []
+                        polys = []
 
                     for text, poly in zip(texts, polys):
                         if text and text.strip():
@@ -1546,6 +1588,199 @@ class OCRBatchService:
         
         logger.info(f"Extracted {len(text_lines)} text lines and {len(bboxes)} bounding boxes from raw OCR result")
         return text_lines, bboxes
+
+    def _apply_reading_order(
+        self,
+        text_lines: List[str],
+        bboxes: List,
+        page_width: float,
+        page_height: float
+    ) -> tuple:
+        """
+        Apply reading order processing to sort text in natural reading sequence.
+
+        Uses the reading_order.pipeline module with auto-detect skew compensation
+        for perspective-distorted documents.
+
+        Args:
+            text_lines: List of text strings from OCR
+            bboxes: List of bounding boxes (polygon format from PaddleOCR)
+            page_width: Page width in PDF points
+            page_height: Page height in PDF points
+
+        Returns:
+            Tuple of (ordered_text_lines, ordered_bboxes)
+        """
+        if not text_lines or not bboxes:
+            return text_lines, bboxes
+
+        # Convert to OCR results format expected by process_reading_order
+        # Also build index mapping for reordering
+        ocr_results = []
+        original_indices = {}  # Map text+bbox to original index
+
+        for i, (text, bbox) in enumerate(zip(text_lines, bboxes)):
+            if not text or not text.strip():
+                continue
+
+            # PaddleOCR bbox format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] (quadrilateral)
+            # Keep as-is for the pipeline
+            try:
+                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    ocr_item = {
+                        'text': text.strip(),
+                        'bbox': bbox,
+                        'confidence': 1.0,
+                        'page': 0,
+                        '_original_index': i  # Store original index
+                    }
+                    ocr_results.append(ocr_item)
+                    # Create a key for lookup
+                    key = f"{text.strip()}_{i}"
+                    original_indices[key] = i
+            except Exception as e:
+                logger.debug(f"Failed to convert bbox {i}: {e}")
+                continue
+
+        if not ocr_results:
+            logger.warning("No valid OCR results created, returning original order")
+            return text_lines, bboxes
+
+        # Calculate page dimensions in pixels from bounding boxes
+        # The OCR bboxes are in pixel coordinates - calculate actual dimensions
+        all_xs = []
+        all_ys = []
+        for ocr_item in ocr_results:
+            bbox = ocr_item['bbox']
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                for pt in bbox:
+                    if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                        all_xs.append(pt[0])
+                        all_ys.append(pt[1])
+
+        if all_xs and all_ys:
+            # Use actual bbox dimensions plus margin
+            actual_pixel_width = max(all_xs) * 1.1  # 10% margin
+            actual_pixel_height = max(all_ys) * 1.1
+            logger.info(f"Reading order: detected bbox range X=0-{max(all_xs):.0f}, Y=0-{max(all_ys):.0f}")
+        else:
+            # Fallback to PDF dimensions converted to ~300 DPI
+            actual_pixel_width = page_width * (300 / 72)
+            actual_pixel_height = page_height * (300 / 72)
+            logger.info(f"Reading order: using PDF-based dimensions {actual_pixel_width:.0f}x{actual_pixel_height:.0f}")
+
+        # Apply reading order pipeline with auto-detection of best line formation method
+        # Auto-detection will choose between:
+        # - Clustered: for skewed/rotated documents (skew > 0.5 degrees)
+        # - Sequential: for high y-variance (curved pages, photos)
+        # - Default greedy: for well-aligned documents
+        config = ReadingOrderConfig(
+            auto_detect_skew=True,
+            skew_detection_threshold=0.5,  # degrees - triggers clustered formation
+            line_baseline_tolerance_multiplier=0.6,
+            line_y_spread_multiplier=1.5,
+            # Let auto-detection choose the best method
+            use_clustered_line_formation=False,
+            use_sequential_line_formation=False,
+        )
+
+        try:
+            # Process reading order with structured output
+            # Use the actual pixel dimensions calculated from bbox coordinates
+            result = process_reading_order(
+                ocr_results=ocr_results,
+                page_width=actual_pixel_width,
+                page_height=actual_pixel_height,
+                config=config,
+                return_structured=True  # Get structured data with coordinates
+            )
+
+            # Extract ordered text and bboxes from structured result
+            # KEY FIX: Return LINES instead of individual words
+            # This ensures PyMuPDF extracts text in proper reading order
+            if isinstance(result, list):
+                ordered_text_lines = []
+                ordered_bboxes = []
+
+                for block in result:
+                    if isinstance(block, dict):
+                        for line in block.get('lines', []):
+                            if isinstance(line, dict):
+                                # Collect all words in this line
+                                line_words = []
+                                line_bbox = line.get('bbox', None)  # Line-level bbox
+
+                                for word in line.get('words', []):
+                                    if isinstance(word, dict):
+                                        text = word.get('text', '')
+                                        if text:
+                                            line_words.append(text)
+
+                                # Join words into a single line string
+                                if line_words:
+                                    line_text = ' '.join(line_words)
+                                    ordered_text_lines.append(line_text)
+
+                                    # Use line bbox if available, otherwise construct from word bboxes
+                                    if line_bbox:
+                                        ordered_bboxes.append(line_bbox)
+                                    else:
+                                        # Fallback: use first word's original bbox
+                                        first_word = line.get('words', [{}])[0]
+                                        orig_idx = first_word.get('_original_index')
+                                        if orig_idx is not None and orig_idx < len(bboxes):
+                                            ordered_bboxes.append(bboxes[orig_idx])
+                                        else:
+                                            # No bbox available - use placeholder
+                                            ordered_bboxes.append(None)
+
+                if ordered_text_lines:
+                    # Filter out lines with None bboxes
+                    valid_lines = [(t, b) for t, b in zip(ordered_text_lines, ordered_bboxes) if b is not None]
+                    if valid_lines:
+                        ordered_text_lines, ordered_bboxes = zip(*valid_lines)
+                        ordered_text_lines = list(ordered_text_lines)
+                        ordered_bboxes = list(ordered_bboxes)
+                    logger.info(f"Reading order applied: {len(text_lines)} words -> {len(ordered_text_lines)} lines")
+                    return ordered_text_lines, ordered_bboxes
+
+            # If structured result didn't work, try using the text order
+            # by re-matching words from the ordered text output
+            if isinstance(result, str) and result:
+                # Get words in reading order from the text
+                ordered_words = result.split()
+                ordered_text_lines = []
+                ordered_bboxes = []
+                used_indices = set()
+
+                # Match words back to original indices
+                for word in ordered_words:
+                    word_clean = word.strip()
+                    for i, (text, bbox) in enumerate(zip(text_lines, bboxes)):
+                        if i not in used_indices and text.strip() == word_clean:
+                            ordered_text_lines.append(text)
+                            ordered_bboxes.append(bbox)
+                            used_indices.add(i)
+                            break
+
+                # Add any remaining unmatched items at the end
+                for i, (text, bbox) in enumerate(zip(text_lines, bboxes)):
+                    if i not in used_indices:
+                        ordered_text_lines.append(text)
+                        ordered_bboxes.append(bbox)
+
+                if len(ordered_text_lines) >= len(text_lines) * 0.8:  # At least 80% matched
+                    logger.info(f"Reading order applied via text matching: {len(ordered_text_lines)} items")
+                    return ordered_text_lines, ordered_bboxes
+
+            logger.warning("Reading order produced unusable output, returning original order")
+            return text_lines, bboxes
+
+        except Exception as e:
+            logger.warning(f"Reading order pipeline failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return text_lines, bboxes
 
     def _process_page_batch(
         self,
@@ -2414,16 +2649,10 @@ class OCRBatchService:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
             multipass_config = MultiPassConfig(
-                florence_batch_size=self.config.florence_batch_size,
-                use_fp16=True,  # Always use FP16 for Florence-2
-                aggressive_cleanup=True,
-                checkpoint_recovery=self.config.checkpoint_recovery,
-                max_workers=self.config.multipass_workers,
-                vram_requirement_mb=2500,  # Florence-2 FP16 requirement
-                paddleocr_config={
-                    'use_gpu': self.use_gpu,
-                    'target_dpi': getattr(self, 'override_dpi', 300)
-                }
+                enable_layout=True,
+                layout_batch_size=self.config.florence_batch_size,  # Reuse florence setting for layout
+                paddle_use_gpu=self.use_gpu,
+                enable_checkpoints=self.config.checkpoint_recovery,
             )
             
             # Create progress callback that integrates with batch service
@@ -2437,8 +2666,7 @@ class OCRBatchService:
             # Create orchestrator with VRAM monitor
             orchestrator = MultiPassPipelineOrchestrator(
                 vram_monitor=self.vram_monitor,
-                progress_callback=multipass_progress_callback,
-                cancellation_flag=self.cancellation_flag
+                progress_callback=multipass_progress_callback
             )
             
             # Run multipass pipeline

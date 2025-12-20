@@ -15,6 +15,8 @@ from typing import Callable, Optional, Dict, Any
 from ..data_structures import PipelineState, FlorenceLayoutResult, OCRPageResult
 from ..checkpoint_manager import CheckpointManager
 from ...reading_order.data_structures import WordBox
+from ...reading_order.pipeline import process_reading_order
+from ...reading_order.config import ReadingOrderConfig
 from ...layout_analysis.fusion_strategies import SimpleFusion, RegionFirstFusion
 
 logger = logging.getLogger(__name__)
@@ -130,7 +132,7 @@ def _process_page(
     ocr_dir: Path,
     layout_dir: Path,
     results_dir: Path,
-    fusion,  # SimpleFusion or RegionFirstFusion
+    fusion,  # SimpleFusion or RegionFirstFusion (fallback)
 ) -> Dict[str, Any]:
     """Process a single page for reading order detection."""
     start_time = time.time()
@@ -149,68 +151,123 @@ def _process_page(
 
     layout_result = FlorenceLayoutResult.load_from_file(layout_path)
 
-    # Convert OCR word boxes to WordBox objects
-    word_boxes = []
+    # Convert OCR word boxes to format expected by process_reading_order
+    ocr_results_for_pipeline = []
+    all_xs = []
+    all_ys = []
     for wb in ocr_result.word_boxes:
         bbox = wb["bbox"]
-        word = WordBox(
-            text=wb["text"],
-            x0=bbox["x0"],
-            y0=bbox["y0"],
-            x1=bbox["x1"],
-            y1=bbox["y1"],
-            page=page_num,
-            confidence=wb.get("confidence", 1.0),
-        )
-        word_boxes.append(word)
+        x0, y0, x1, y1 = bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"]
+        all_xs.extend([x0, x1])
+        all_ys.extend([y0, y1])
 
-    # Run fusion
-    ordered_blocks = fusion.fuse(word_boxes, layout_result)
+        # CRITICAL: Use original polygon if available (preserves curve information)
+        # Otherwise fall back to reconstructing from bbox
+        if "original_poly" in wb:
+            poly = wb["original_poly"]
+        else:
+            # Convert bbox to polygon format [[x0,y0],[x1,y0],[x1,y1],[x0,y1]]
+            poly = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 
-    # Convert blocks to serializable format
+        ocr_item = {
+            'text': wb["text"],
+            'bbox': poly,
+            'confidence': wb.get("confidence", 1.0),
+            'page': page_num,
+        }
+
+        # Pass pre-calculated center_y if available (more accurate for curved text)
+        if "center_y" in wb:
+            ocr_item['center_y'] = wb["center_y"]
+
+        ocr_results_for_pipeline.append(ocr_item)
+
+    # Calculate page dimensions
+    page_width = max(all_xs) * 1.1 if all_xs else 2550
+    page_height = max(all_ys) * 1.1 if all_ys else 3300
+
+    # Use our reading order pipeline with AUTO-DETECTION
+    # This handles book spine curvature and skewed documents properly
+    reading_order_config = ReadingOrderConfig(
+        auto_detect_skew=True,
+        skew_detection_threshold=0.5,  # degrees - triggers clustered formation
+        line_baseline_tolerance_multiplier=0.6,
+        line_y_spread_multiplier=1.5,
+        # Let auto-detection choose the best method (clustered for curves/skew)
+        use_clustered_line_formation=False,
+        use_sequential_line_formation=False,
+    )
+
+    # Process reading order - returns structured blocks
+    structured_result = process_reading_order(
+        ocr_results=ocr_results_for_pipeline,
+        page_width=page_width,
+        page_height=page_height,
+        config=reading_order_config,
+        return_structured=True
+    )
+
+    # Convert structured result to blocks_data format
     blocks_data = []
-    for block in ordered_blocks:
+    for block_idx, block in enumerate(structured_result):
         block_dict = {
-            "block_id": block.block_id,
-            "block_type": block.block_type,
-            "reading_order": block.reading_order,
-            "bbox": {
-                "x0": block.x0,
-                "y0": block.y0,
-                "x1": block.x1,
-                "y1": block.y1,
-            },
+            "block_id": block_idx,
+            "block_type": block.get("type", "text"),
+            "reading_order": block_idx,
+            "bbox": block.get("bbox", {"x0": 0, "y0": 0, "x1": 0, "y1": 0}),
             "lines": [],
         }
 
-        for line in block.lines:
+        # Handle bbox format - may be [x0,y0,x1,y1] or dict
+        bbox = block.get("bbox", [0, 0, 0, 0])
+        if isinstance(bbox, list) and len(bbox) == 4:
+            block_dict["bbox"] = {"x0": bbox[0], "y0": bbox[1], "x1": bbox[2], "y1": bbox[3]}
+
+        for line_idx, line in enumerate(block.get("lines", [])):
+            words = line.get("words", [])
+            line_text = " ".join(w.get("text", "") for w in words)
+
+            # Calculate line bbox from words
+            if words:
+                word_bboxes = [w.get("bbox", [0, 0, 0, 0]) for w in words]
+                line_x0 = min(b[0] if isinstance(b, list) else b.get("x0", 0) for b in word_bboxes)
+                line_y0 = min(b[1] if isinstance(b, list) else b.get("y0", 0) for b in word_bboxes)
+                line_x1 = max(b[2] if isinstance(b, list) else b.get("x1", 0) for b in word_bboxes)
+                line_y1 = max(b[3] if isinstance(b, list) else b.get("y1", 0) for b in word_bboxes)
+            else:
+                line_x0, line_y0, line_x1, line_y1 = 0, 0, 0, 0
+
             line_dict = {
-                "line_id": line.line_id,
-                "text": line.get_text(),
-                "bbox": {
-                    "x0": line.x0,
-                    "y0": line.y0,
-                    "x1": line.x1,
-                    "y1": line.y1,
-                },
-                "words": [
-                    {
-                        "text": w.text,
-                        "bbox": {"x0": w.x0, "y0": w.y0, "x1": w.x1, "y1": w.y1},
-                        "confidence": w.confidence,
-                    }
-                    for w in line.words
-                ],
+                "line_id": line_idx,
+                "text": line_text,
+                "bbox": {"x0": line_x0, "y0": line_y0, "x1": line_x1, "y1": line_y1},
+                "words": [],
             }
+
+            for w in words:
+                word_bbox = w.get("bbox", [0, 0, 0, 0])
+                if isinstance(word_bbox, list) and len(word_bbox) == 4:
+                    word_bbox_dict = {"x0": word_bbox[0], "y0": word_bbox[1], "x1": word_bbox[2], "y1": word_bbox[3]}
+                else:
+                    word_bbox_dict = word_bbox
+                line_dict["words"].append({
+                    "text": w.get("text", ""),
+                    "bbox": word_bbox_dict,
+                    "confidence": w.get("confidence", 1.0),
+                })
+
             block_dict["lines"].append(line_dict)
 
         blocks_data.append(block_dict)
 
     # Generate ordered text
-    ordered_text = "\n\n".join(
-        block.get_text()
-        for block in sorted(ordered_blocks, key=lambda b: b.reading_order or 0)
-    )
+    ordered_text_parts = []
+    for block in blocks_data:
+        block_text_parts = []
+        for line in block.get("lines", []):
+            block_text_parts.append(line.get("text", ""))
+        ordered_text_parts.append("\n".join(block_text_parts))
+    ordered_text = "\n\n".join(ordered_text_parts)
 
     processing_time = time.time() - start_time
 
@@ -223,7 +280,7 @@ def _process_page(
         "ordered_text": ordered_text,
         "metadata": {
             "processing_time_seconds": processing_time,
-            "fusion_method": fusion.__class__.__name__,
+            "fusion_method": "reading_order_pipeline_auto",
             "block_count": len(blocks_data),
         },
     }

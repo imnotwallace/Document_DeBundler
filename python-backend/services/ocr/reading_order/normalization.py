@@ -48,9 +48,14 @@ def validate_word_box(word_box: WordBox, page_width: float, page_height: float) 
     is_valid = all(checks)
 
     if not is_valid:
+        # Log which specific check failed
+        check_names = ['text_not_empty', 'x1>x0', 'y1>y0', 'confidence_valid',
+                       'width<page_width', 'height<page_height',
+                       'x0>=0', 'y0>=0', 'x1<=page_width', 'y1<=page_height']
+        failed = [name for name, check in zip(check_names, checks) if not check]
         logger.debug(f"Invalid word box rejected: '{word_box.text}' "
                     f"bbox=[{word_box.x0:.1f}, {word_box.y0:.1f}, {word_box.x1:.1f}, {word_box.y1:.1f}] "
-                    f"conf={word_box.confidence:.2f}")
+                    f"conf={word_box.confidence:.2f}, failed checks: {failed}")
 
     return is_valid
 
@@ -91,11 +96,16 @@ def filter_noise(word_boxes: List[WordBox],
             continue
 
         # Filter by size (too large - likely detection error)
+        # BUT: preserve large words at top of page (likely headers)
         max_width = page_width * config.max_word_width_ratio
-        if word_box.width > max_width:
+        is_in_header_zone = word_box.y0 < page_height * config.header_zone_ratio
+        if word_box.width > max_width and not is_in_header_zone:
             logger.debug(f"Too large word rejected: '{word_box.text}' "
                         f"width={word_box.width:.1f} (max={max_width:.1f})")
             continue
+        elif word_box.width > max_width and is_in_header_zone:
+            logger.info(f"Large word preserved as header: '{word_box.text}' "
+                       f"width={word_box.width:.1f} at y={word_box.y0:.1f}")
 
         filtered.append(word_box)
 

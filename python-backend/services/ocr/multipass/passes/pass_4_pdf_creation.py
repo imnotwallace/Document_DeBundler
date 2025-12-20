@@ -159,42 +159,55 @@ def _create_page_pdf(
     page_rect = page.rect
     page.insert_image(page_rect, filename=str(image_path))
 
-    # Insert invisible text
+    # Insert invisible text - using SEQUENTIAL Y-POSITIONS to force reading order
+    # PyMuPDF's get_text() extracts by physical position. For curved documents,
+    # original word positions can cause wrong extraction order. Instead, we insert
+    # text at sequential Y positions to guarantee correct reading order.
     text_items = 0
     ordered_blocks = reading_order_data.get("ordered_blocks", [])
 
+    # Calculate line insertion parameters
+    # Use a small font and tight spacing - text is invisible anyway
+    font_size = 8  # Small but reasonable
+    line_height = font_size * 1.2  # Typical line height
+    
+    # Start position - just below top margin
+    current_y = 10  # Start near top
+    left_margin = 10  # Left margin for text
+
     for block in sorted(ordered_blocks, key=lambda b: b.get("reading_order", 0)):
         for line in block.get("lines", []):
-            for word in line.get("words", []):
-                text = word.get("text", "")
-                if not text.strip():
-                    continue
+            words = line.get("words", [])
+            if not words:
+                continue
 
-                bbox = word.get("bbox", {})
-                x0 = bbox.get("x0", 0) * scale
-                y0 = bbox.get("y0", 0) * scale
-                x1 = bbox.get("x1", 0) * scale
-                y1 = bbox.get("y1", 0) * scale
+            # Build full line text from words
+            line_text = " ".join(w.get("text", "") for w in words if w.get("text", "").strip())
+            if not line_text.strip():
+                continue
 
-                # Calculate font size based on box height
-                box_height = y1 - y0
-                font_size = max(6, min(box_height * 0.8, 72))
-
-                try:
-                    # Insert invisible text
-                    page.insert_text(
-                        (x0, y1 - 2),  # Bottom-left of text box
-                        text,
-                        fontsize=font_size,
-                        fontname="helv",
-                        color=(1, 1, 1),  # White (invisible on white)
-                        render_mode=3,  # Invisible
-                        overlay=True,
-                    )
-                    text_items += 1
-                except Exception as e:
-                    logger.debug(f"Failed to insert text '{text}': {e}")
-                    continue
+            try:
+                # Insert full line as invisible text at SEQUENTIAL position
+                # This guarantees correct extraction order regardless of original word positions
+                page.insert_text(
+                    (left_margin, current_y),
+                    line_text,
+                    fontsize=font_size,
+                    fontname="helv",
+                    color=(1, 1, 1),  # White (invisible on white)
+                    render_mode=3,  # Invisible
+                    overlay=True,
+                )
+                text_items += 1
+                current_y += line_height  # Move to next line position
+                
+                # Wrap to avoid going off page (shouldn't happen in practice)
+                if current_y > page_height - 10:
+                    current_y = 10
+                    
+            except Exception as e:
+                logger.debug(f"Failed to insert line text '{line_text[:30]}...': {e}")
+                continue
 
     # Save PDF
     output_path = results_dir / f"page_{page_num:04d}.pdf"
